@@ -101,13 +101,24 @@ def test_character_detail_fields_complete():
         assert c["city"] == city, cid
         assert isinstance(c["hobbies"], list) and len(c["hobbies"]) >= 3, cid
         assert isinstance(c["motto"], str) and len(c["motto"]) >= 10, cid
-        # 3 life photos, all placeholders — no invented URL, never a real photo
+        # 3 life photos, real URLs shipped in the image (never placeholders)
         assert isinstance(c["photos"], list) and len(c["photos"]) == 3, cid
         for p in c["photos"]:
-            assert p["photo_url"] is None, cid
-            assert p["is_placeholder"] is True, cid
+            assert isinstance(p["photo_url"], str) and p["photo_url"].startswith(
+                f"/static/photos/{cid}/life"
+            ), cid
+            assert p["is_placeholder"] is False, cid
             assert p["label"] == "AI 生成 · 虚拟人物", cid
-        assert c["photo_url"] is None and c["photo_status"] == "pending", cid
+        assert c["photo_url"] == f"/static/photos/{cid}/avatar.jpg", cid
+        assert c["photo_status"] == "ready", cid
+        # 2 candid shots, reserved for future reply attachments
+        assert isinstance(c["candid_photos"], list) and len(c["candid_photos"]) == 2, cid
+        for p in c["candid_photos"]:
+            assert isinstance(p["photo_url"], str) and p["photo_url"].startswith(
+                f"/static/photos/{cid}/candid"
+            ), cid
+            assert p["is_placeholder"] is False, cid
+            assert p["label"] == "AI 生成 · 虚拟人物", cid
     # detail endpoint returns the same fields
     r = client.get("/api/v1/characters/P01", headers=_auth(tok))
     assert r.status_code == 200

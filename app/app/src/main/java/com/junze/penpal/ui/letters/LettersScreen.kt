@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -44,13 +46,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.junze.penpal.R
+import com.junze.penpal.data.api.ApiClient
 import com.junze.penpal.data.api.CharacterDto
 import com.junze.penpal.data.api.CharacterPhotoDto
 import com.junze.penpal.data.api.LetterDto
@@ -175,10 +182,24 @@ fun displayGender(gender: String?): String? = when (gender?.trim()?.lowercase())
 }
 
 /**
- * The 3 life-photo slots for a character. The backend returns photo_url
- * null for now, so every slot is a labelled placeholder — never presented
- * as a real photo. (No image loader is bundled yet; when photo_url goes
- * live, a loader must be added before real photos can be shown.)
+ * The backend returns photo paths RELATIVE to the server root
+ * ("/static/photos/P01/avatar.jpg"). Resolve them against the app's
+ * fixed base URL for Coil; absolute URLs pass through unchanged.
+ * Null / blank / unrecognised values stay null — the caller then
+ * shows the initial-letter placeholder, never a broken image.
+ */
+fun resolvePhotoUrl(url: String?): String? {
+    val u = url?.trim().orEmpty()
+    if (u.isBlank()) return null
+    if (u.startsWith("http://") || u.startsWith("https://")) return u
+    if (u.startsWith("/")) return ApiClient.DEFAULT_BASE_URL + u
+    return null
+}
+
+/**
+ * The 3 life-photo slots for a character. Real photos (is_placeholder
+ * false, photo_url set) are shown as images; slots without a real URL
+ * stay labelled placeholders — never presented as a real photo.
  */
 fun CharacterDto.photoSlots(): List<CharacterPhotoDto> {
     val real = (photos ?: emptyList()).take(3)
@@ -191,20 +212,37 @@ fun CharacterDto.photoSlots(): List<CharacterPhotoDto> {
     }
 }
 
-/** Big placeholder avatar: initial in a circle + the AI label. */
+/** Avatar: the real photo when available, else the initial-letter placeholder. */
 @Composable
 fun CharacterAvatar(character: CharacterDto, size: androidx.compose.ui.unit.Dp) {
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = character.name.firstOrNull()?.toString() ?: "？",
-            style = MaterialTheme.typography.headlineMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer
+    val url = resolvePhotoUrl(character.photoUrl)
+    var loadFailed by remember(url) { mutableStateOf(false) }
+    if (url == null || loadFailed) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = character.name.firstOrNull()?.toString() ?: "？",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+        }
+    } else {
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(url)
+                .crossfade(true)
+                .build(),
+            contentDescription = "${character.name} 的照片",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape),
+            onError = { loadFailed = true }
         )
     }
 }
@@ -416,7 +454,7 @@ fun CharacterDetailScreen(
                     }
                 }
             }
-            // ---- 3 life photos (placeholders until photo_url goes live) ----
+            // ---- 3 life photos (real image when the backend has one, else placeholder) ----
             item {
                 Text(
                     text = "生活照",
@@ -424,6 +462,9 @@ fun CharacterDetailScreen(
                 )
             }
             items(current.photoSlots()) { photo ->
+                val photoUrl = resolvePhotoUrl(photo.photoUrl)
+                var photoFailed by remember(photoUrl) { mutableStateOf(false) }
+                val showReal = photoUrl != null && photo.isPlaceholder != true && !photoFailed
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -435,8 +476,24 @@ fun CharacterDetailScreen(
                             .padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
+                        if (showReal) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(photoUrl)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = photo.scene ?: "生活照",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(3f / 4f)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                onError = { photoFailed = true }
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                         Text(
-                            text = photo.scene ?: "生活照占位图",
+                            text = photo.scene ?: "生活照",
                             style = MaterialTheme.typography.bodyLarge
                         )
                         Spacer(modifier = Modifier.height(4.dp))
@@ -445,13 +502,15 @@ fun CharacterDetailScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "照片尚未上线，这里不是真人照片",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
+                        if (!showReal) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "照片尚未上线，这里不是真人照片",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                 }
             }

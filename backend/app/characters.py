@@ -15,6 +15,16 @@ M0 ships NO real photo files: `photo_url` is None and `photo_status`
 is "pending" — the prompt is stored so the asset can be generated
 later. Never claim a photo has been generated when it has not.
 
+UPDATE (photos live): the 30 final photos (6 per character, P01–P05)
+are now shipped inside the Docker image
+(backend/app/static/photos/<PID>/<file>.jpg) and served at
+GET /static/photos/<PID>/<file>.jpg. `photo_url` is the avatar's
+relative URL, `photo_status` is "ready", `photos` are the 3 life
+photos with real URLs (is_placeholder=False), and `candid_photos`
+are the 2 candid shots reserved for future reply attachments.
+`placeholder_photos()` is kept only as a fallback for a character
+with no real photo (e.g. unseeded P06+).
+
 P06–P20 exist in characters.md but are NOT seeded in M0; they arrive
 in M2 (unlocks grant them in order P06, P07, ...).
 """
@@ -29,6 +39,51 @@ PHOTO_BASE = (
 )
 
 PHOTO_SCENES = ("主生活照", "工作场景", "日常场景")
+
+# Real photos, shipped inside the Docker image at
+# backend/app/static/photos/<PID>/<file>.jpg and served at
+# GET /static/photos/<PID>/<file>.jpg (see main.py). URLs are
+# RELATIVE paths on purpose: the same image serves from a local
+# dev server (:7000) and from the built-in app address
+# (https://penpal.250886.xyz:32123) — the client prepends its own
+# base URL. Only the 6 final files per character are shipped; the
+# 18 rejected candidates per character stay out of the image.
+PHOTO_FILES = ("avatar.jpg", "life1.jpg", "life2.jpg", "life3.jpg",
+               "candid1.jpg", "candid2.jpg")
+LIFE_FILES = ("life1.jpg", "life2.jpg", "life3.jpg")
+CANDID_FILES = ("candid1.jpg", "candid2.jpg")
+
+
+def photo_url(character_id: str, filename: str) -> str:
+    """Relative URL of one shipped photo, e.g. /static/photos/P01/avatar.jpg."""
+    return f"/static/photos/{character_id}/{filename}"
+
+
+def real_photos(character_id: str) -> list[dict]:
+    """The 3 life photos, real URLs, never placeholders."""
+    return [
+        {
+            "photo_url": photo_url(character_id, filename),
+            "is_placeholder": False,
+            "label": "AI 生成 · 虚拟人物",
+            "scene": scene,
+        }
+        for filename, scene in zip(LIFE_FILES, PHOTO_SCENES)
+    ]
+
+
+def candid_photos(character_id: str) -> list[dict]:
+    """2 candid shots, reserved for future reply attachments.
+    Not shown in the app yet — the backend field is ready."""
+    return [
+        {
+            "photo_url": photo_url(character_id, filename),
+            "is_placeholder": False,
+            "label": "AI 生成 · 虚拟人物",
+            "scene": "随拍",
+        }
+        for filename in CANDID_FILES
+    ]
 
 
 def placeholder_photos() -> list[dict]:
@@ -54,7 +109,8 @@ CHARACTERS: list[dict] = [
         "occupation": "助理建筑师",
         "city": "上海",
         "motto": "我不擅长安慰人，但擅长陪你把一团乱麻拆开，一件一件说清楚。",
-        "photos": placeholder_photos(),
+        "photos": real_photos("P01"),
+        "candid_photos": candid_photos("P01"),
         "appearance": "短发青年，身材精瘦。黑色短发，178cm、约62kg，平时穿素色衬衫和工装裤，背一个装满速写本的帆布包。",
         "personality": "安静、观察型、理性细腻。话不多，每句都认真想过；不擅长安慰人，擅长把一团乱麻拆开，一件一件说清楚。",
         "hobbies": ["城市速写", "骑行", "老电影", "手冲咖啡", "收集旧地图"],
@@ -68,8 +124,8 @@ CHARACTERS: list[dict] = [
             "一个人住在合租的老房子里，周末骑行、速写，信是他少数能慢慢说话的地方。"
         ),
         "photo_prompt": PHOTO_BASE + "傍晚工地旁的楼梯上坐着，短发，精瘦，手里拿着速写本和铅笔，身后是未完工的楼体和晚霞。",
-        "photo_url": None,
-        "photo_status": "pending",
+        "photo_url": photo_url("P01", "avatar.jpg"),
+        "photo_status": "ready",
         "relationship": "知己",
         "is_ai": True,
         "unlocked_by_default": True,
@@ -82,7 +138,8 @@ CHARACTERS: list[dict] = [
         "occupation": "互联网产品经理",
         "city": "北京",
         "motto": "焦虑不是你的错，先把它放下来，我们再一条一条想办法。",
-        "photos": placeholder_photos(),
+        "photos": real_photos("P02"),
+        "candid_photos": candid_photos("P02"),
         "appearance": "29 岁女性，日常通勤穿着，神情清醒直接。",
         "personality": "清醒、直接、有同理心。经历过加班、裁员、项目被砍，说话不绕弯，但从不落井下石。",
         "hobbies": ["做饭", "长跑", "看脱口秀", "整理 Notion", "周末去菜市场"],
@@ -96,8 +153,8 @@ CHARACTERS: list[dict] = [
             "仍然会焦虑，但学会了不把焦虑当成自己的错。"
         ),
         "photo_prompt": PHOTO_BASE + "周末清晨的菜市场，提着布袋，站在蔬菜摊前挑番茄，笑得很放松。",
-        "photo_url": None,
-        "photo_status": "pending",
+        "photo_url": photo_url("P02", "avatar.jpg"),
+        "photo_status": "ready",
         "relationship": "知己",
         "is_ai": True,
         "unlocked_by_default": True,
@@ -110,7 +167,8 @@ CHARACTERS: list[dict] = [
         "occupation": "财务分析师",
         "city": "潍坊",
         "motto": "算清楚了，心里就不慌了；大账小账，我们一笔一笔慢慢算。",
-        "photos": placeholder_photos(),
+        "photos": real_photos("P03"),
+        "candid_photos": candid_photos("P03"),
         "appearance": "34 岁男性，稳重，日常穿着朴素。",
         "personality": "稳、慢、可靠。数字敏感，生活里却很松弛，相信“算清楚了，心里就不慌了”。",
         "hobbies": ["记账", "钓鱼", "下棋", "修旧收音机", "给孩子讲数学故事"],
@@ -123,8 +181,8 @@ CHARACTERS: list[dict] = [
             "房贷还有十几年。他不擅长说漂亮话，但家里的大事小事，账都算得清清楚楚。"
         ),
         "photo_prompt": PHOTO_BASE + "河边钓鱼的清晨，戴着帽子坐在小马扎上，鱼竿架在一旁，神情专注安静。",
-        "photo_url": None,
-        "photo_status": "pending",
+        "photo_url": photo_url("P03", "avatar.jpg"),
+        "photo_status": "ready",
         "relationship": "知己",
         "is_ai": True,
         "unlocked_by_default": True,
@@ -137,7 +195,8 @@ CHARACTERS: list[dict] = [
         "occupation": "外企 HR",
         "city": "杭州",
         "motto": "很多事不是你的错，你不用现在就想明白，我陪你慢慢说。",
-        "photos": placeholder_photos(),
+        "photos": real_photos("P04"),
+        "candid_photos": candid_photos("P04"),
         "appearance": "27 岁女性，温和，日常通勤穿着。",
         "personality": "温和、敏锐、边界感强。见过很多人的入职和离职，懂得“很多事不是你的错”。",
         "hobbies": ["养绿植", "烘焙", "看传记", "周末爬山"],
@@ -150,8 +209,8 @@ CHARACTERS: list[dict] = [
             "喜欢在信里慢慢说话，因为白天在公司说话都要很小心。"
         ),
         "photo_prompt": PHOTO_BASE + "阳台上给绿植浇水，穿着家居服，阳光落在头发上，手里拿着小水壶。",
-        "photo_url": None,
-        "photo_status": "pending",
+        "photo_url": photo_url("P04", "avatar.jpg"),
+        "photo_status": "ready",
         "relationship": "知己",
         "is_ai": True,
         "unlocked_by_default": True,
@@ -164,7 +223,8 @@ CHARACTERS: list[dict] = [
         "occupation": "律师",
         "city": "武汉",
         "motto": "先分清事实和感受，再谈能做什么；每句话，我都负责。",
-        "photos": placeholder_photos(),
+        "photos": real_photos("P05"),
+        "candid_photos": candid_photos("P05"),
         "appearance": "31 岁男性，沉稳，日常穿着利落。",
         "personality": "冷静、讲理、护短。说话有分寸，越是情绪大的事，越慢。",
         "hobbies": ["跑步", "读史", "做饭", "收藏钢笔", "周末去旧书市场"],
@@ -177,8 +237,8 @@ CHARACTERS: list[dict] = [
             "一个人住，跑步、读史，周末去旧书市场，信写得很慢，但每句都负责。"
         ),
         "photo_prompt": PHOTO_BASE + "旧书市场的一个摊位前，蹲着翻一本旧书，神情专注。",
-        "photo_url": None,
-        "photo_status": "pending",
+        "photo_url": photo_url("P05", "avatar.jpg"),
+        "photo_status": "ready",
         "relationship": "知己",
         "is_ai": True,
         "unlocked_by_default": True,
@@ -198,6 +258,11 @@ UNLOCK_ORDER = [
 def public_character(c: dict) -> dict:
     """What the app may show for a character. No internal fields."""
     photos = c.get("photos") or placeholder_photos()
+    candid = c.get("candid_photos")
+    if not isinstance(candid, list) or not candid:
+        # Old DB rows / seed dicts without candid shots: derive from the
+        # seed so the field is never missing for P01–P05.
+        candid = candid_photos(c["id"]) if c["id"] in BY_ID else []
     return {
         "id": c["id"],
         "name": c["name"],
@@ -217,4 +282,5 @@ def public_character(c: dict) -> dict:
         "photo_url": c["photo_url"],
         "photo_status": c["photo_status"],
         "photos": photos,
+        "candid_photos": candid,
     }

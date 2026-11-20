@@ -177,8 +177,10 @@ data class CharacterDto(
     /** 交友宣言 (backend: motto). */
     val motto: String? = null,
     val city: String? = null,
-    /** 3 张生活照；photo_url 为 null 时是占位 (backend: photos). */
+    /** 3 张生活照；photo_url 为 null / is_placeholder 时是占位 (backend: photos). */
     val photos: List<CharacterPhotoDto>? = null,
+    /** 2 张随拍，后端已备好字段，供以后回信附图用；App 暂不展示 (backend: candid_photos). */
+    val candidPhotos: List<CharacterPhotoDto>? = null,
     /** True when this device may write to the character; locked ones are hidden. */
     val unlocked: Boolean = true
 )

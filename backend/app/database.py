@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS characters (
     city TEXT,
     motto TEXT,
     photos TEXT,
+    candid_photos TEXT,
     relationship TEXT NOT NULL DEFAULT '知己',
     unlocked_by_default INTEGER NOT NULL DEFAULT 1
 );
@@ -293,6 +294,7 @@ def _migrate_columns() -> None:
             ("city", "TEXT"),
             ("motto", "TEXT"),
             ("photos", "TEXT"),
+            ("candid_photos", "TEXT"),
         ],
     }
     with connect() as conn:
@@ -306,9 +308,12 @@ def _migrate_columns() -> None:
 def _seed_characters() -> None:
     """Seed P01–P05 from app/characters.py (fixed text). Idempotent:
     existing rows are left alone so a future edit of the seed does not
-    silently rewrite a live character — except the three new
-    profile fields (city/motto/photos), which are backfilled where
-    they are still NULL because no live data ever lived in them."""
+    silently rewrite a live character — except the profile/photo
+    fields (city/motto/photos/candid_photos/photo_url/photo_status),
+    which are backfilled where they are still NULL / "pending" /
+    placeholders, because no live data ever lived in them. This is
+    what heals an already-deployed DB whose rows were seeded when
+    photos were still pending."""
     with connect() as conn:
         for c in CHARACTERS:
             conn.execute(
@@ -316,8 +321,8 @@ def _seed_characters() -> None:
                 " (id, name, age, gender, occupation, appearance, personality,"
                 "  hobbies, writing_style, topics, boundaries, life_history,"
                 "  photo_prompt, photo_url, photo_status, city, motto, photos,"
-                "  relationship, unlocked_by_default)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "  candid_photos, relationship, unlocked_by_default)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     c["id"], c["name"], c["age"], c["gender"], c["occupation"],
                     c["appearance"], c["personality"],
@@ -329,17 +334,25 @@ def _seed_characters() -> None:
                     c.get("city"),
                     c.get("motto"),
                     json.dumps(c.get("photos") or placeholder_photos(), ensure_ascii=False),
+                    json.dumps(c.get("candid_photos") or [], ensure_ascii=False),
                     c["relationship"],
                     1 if c["unlocked_by_default"] else 0,
                 ),
             )
             conn.execute(
-                "UPDATE characters SET city = ?, motto = ?, photos = ?"
-                " WHERE id = ? AND (city IS NULL OR motto IS NULL OR photos IS NULL)",
+                "UPDATE characters SET city = ?, motto = ?, photos = ?,"
+                " candid_photos = ?, photo_url = ?, photo_status = ?"
+                " WHERE id = ? AND (city IS NULL OR motto IS NULL OR photos IS NULL"
+                " OR candid_photos IS NULL OR photo_url IS NULL"
+                " OR photo_status = 'pending'"
+                " OR photos LIKE '%\"is_placeholder\": true%')",
                 (
                     c.get("city"),
                     c.get("motto"),
                     json.dumps(c.get("photos") or placeholder_photos(), ensure_ascii=False),
+                    json.dumps(c.get("candid_photos") or [], ensure_ascii=False),
+                    c["photo_url"],
+                    c["photo_status"],
                     c["id"],
                 ),
             )
@@ -690,7 +703,29 @@ def _decode_character(row: dict) -> dict:
         photos = None
     if not isinstance(photos, list) or not photos:
         photos = placeholder_photos()
+    try:
+        candid = json.loads(row.get("candid_photos") or "")
+    except (ValueError, TypeError):
+        candid = None
+    if not isinstance(candid, list):
+        candid = []
+    seed = BY_ID.get(row.get("id") or "")
+    if seed:
+        # Rows seeded before the photos went live still carry
+        # placeholders (photo_url NULL / status "pending"): prefer the
+        # seed's real photos so an already-deployed DB heals on read,
+        # even if the backfill in _seed_characters was skipped.
+        if all(
+            isinstance(p, dict) and p.get("is_placeholder")
+            for p in photos
+        ):
+            photos = seed.get("photos") or photos
+            row["photo_url"] = seed.get("photo_url") or row.get("photo_url")
+            row["photo_status"] = seed.get("photo_status") or row.get("photo_status")
+        if not candid:
+            candid = seed.get("candid_photos") or []
     row["photos"] = photos
+    row["candid_photos"] = candid
     row["unlocked_by_default"] = bool(row.get("unlocked_by_default"))
     row["is_ai"] = True
     row["ai_label"] = "AI 生成 · 虚拟人物"

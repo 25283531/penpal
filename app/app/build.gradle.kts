@@ -74,4 +74,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.gson)
+
+    // Image loading (character photos served by the backend, Coil + OkHttp)
+    implementation(libs.coil.compose)
 }

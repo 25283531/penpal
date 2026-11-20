@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 
 from . import admin, database, email_auth, evolution
 from .auth import get_current_device, issue_token
-from .characters import BY_ID, public_character
+from .characters import BY_ID, PHOTO_FILES, public_character
 from .content_filter import validate_user_letter
 from .llm import list_llm_providers
 from .membership import PHASE1_FREE, delivery_stage, expected_reply_at, reply_due_date, tier_for
@@ -64,6 +64,30 @@ def root():
 def admin_page():
     path = Path(__file__).resolve().parent / "admin.html"
     return FileResponse(path, media_type="text/html")
+
+
+# ---------- character photos (shipped inside the image) ----------
+
+# Photos live in the image at backend/app/static/photos/<PID>/<file>.jpg
+# — NOT in the /app/data volume (a volume mount would hide/erase them).
+# URLs are relative (/static/photos/P01/avatar.jpg); the app prepends
+# its built-in base URL. Filenames are immutable per release, so a
+# 1-day public cache is safe; unknown ids / filenames 404.
+PHOTOS_DIR = Path(__file__).resolve().parent / "static" / "photos"
+
+
+@app.get("/static/photos/{character_id}/{filename}", include_in_schema=False)
+def character_photo(character_id: str, filename: str):
+    if character_id not in BY_ID or filename not in PHOTO_FILES:
+        raise HTTPException(status_code=404, detail="photo not found")
+    path = PHOTOS_DIR / character_id / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="photo not found")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 # ---------- schemas ----------

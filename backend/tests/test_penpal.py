@@ -130,9 +130,21 @@ def test_characters_seed_p01_p05_only():
     assert p01["relationship"] == "知己"
     assert p01["is_ai"] is True
     assert p01["ai_label"] == "AI 生成 · 虚拟人物"
-    # Photo: pending asset only — no URL, never claimed generated.
-    assert p01["photo_url"] is None
-    assert p01["photo_status"] == "pending"
+    # Photo: real asset shipped in the image — avatar URL + ready status.
+    assert p01["photo_url"] == "/static/photos/P01/avatar.jpg"
+    assert p01["photo_status"] == "ready"
+    assert [p["photo_url"] for p in p01["photos"]] == [
+        "/static/photos/P01/life1.jpg",
+        "/static/photos/P01/life2.jpg",
+        "/static/photos/P01/life3.jpg",
+    ]
+    assert all(p["is_placeholder"] is False for p in p01["photos"])
+    assert all(p["label"] == "AI 生成 · 虚拟人物" for p in p01["photos"])
+    assert [p["photo_url"] for p in p01["candid_photos"]] == [
+        "/static/photos/P01/candid1.jpg",
+        "/static/photos/P01/candid2.jpg",
+    ]
+    assert all(p["is_placeholder"] is False for p in p01["candid_photos"])
     assert all(c["unlocked"] is True for c in chars)
 
     # P06 is not seeded in M0

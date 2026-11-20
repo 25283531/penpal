@@ -288,6 +288,7 @@ class PenpalRepository(
         relationship = relationship, photoUrl = photoUrl,
         photoStatus = photoStatus, motto = motto, city = city,
         photos = photos?.mapNotNull { it.photoUrl }?.joinToString("\n"),
+        candidPhotos = candidPhotos?.mapNotNull { it.photoUrl }?.joinToString("\n"),
         unlocked = unlocked
     )
 
@@ -300,6 +301,8 @@ class PenpalRepository(
         relationship = relationship, photoUrl = photoUrl,
         photoStatus = photoStatus, motto = motto, city = city,
         photos = photos?.split("\n")?.filter { it.isNotBlank() }
+            ?.map { CharacterPhotoDto(photoUrl = it) },
+        candidPhotos = candidPhotos?.split("\n")?.filter { it.isNotBlank() }
             ?.map { CharacterPhotoDto(photoUrl = it) },
         unlocked = unlocked
     )

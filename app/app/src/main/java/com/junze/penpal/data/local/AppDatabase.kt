@@ -33,6 +33,8 @@ data class CharacterEntity(
     val city: String?,
     /** photo urls joined with "\n" (null urls are dropped; UI pads to 3 slots). */
     val photos: String?,
+    /** candid photo urls joined with "\n"; cached for future reply attachments, not shown yet. */
+    val candidPhotos: String?,
     val unlocked: Boolean
 )
 
@@ -89,11 +91,12 @@ interface LetterDao {
 
 // ---------- Database ----------
 
+// v3 adds character candidPhotos (cached for future reply attachments).
 // v2 adds character gender/motto/city/photos and letter
 // user_read_at / character_read_at / expected_reply_at /
 // delivery_stage(_text). Pre-release app: destructive migration is fine
 // (the cache is rebuilt from the server on next refresh).
-@Database(entities = [CharacterEntity::class, LetterEntity::class], version = 2, exportSchema = false)
+@Database(entities = [CharacterEntity::class, LetterEntity::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun characterDao(): CharacterDao
     abstract fun letterDao(): LetterDao
