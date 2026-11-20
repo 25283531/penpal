@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">笔友</string>
+
+    <string name="nav_home">首页</string>
+    <string name="nav_letters">笔友</string>
+    <string name="nav_me">我的</string>
+
+    <string name="action_retry">重试</string>
+    <string name="action_save">保存</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_confirm">确定</string>
+    <string name="action_back">返回</string>
+    <string name="loading">加载中…</string>
+    <string name="network_error">网络不可用，显示的是上次保存的内容</string>
+    <string name="server_unreachable">服务器未连接，请稍后再试</string>
+    <string name="unknown_error">出错了，请稍后再试</string>
+
+    <string name="home_title">笔友</string>
+    <string name="home_subtitle">从前车马很慢，书信很远，\n一生只能交心一个人。</string>
+    <string name="home_my_letters">最近的信</string>
+    <string name="home_no_letters">还没有信，先去「笔友」选一位知己，写下第一封信吧</string>
+    <string name="home_points">我的积分：%1$d</string>
+    <string name="home_characters">认识笔友</string>
+    <string name="verify_banner">邮箱未验证：可正常使用，验证后可改密/找回</string>
+    <string name="verify_action">去验证</string>
+
+    <string name="characters_title">笔友</string>
+    <string name="characters_empty">人物列表加载失败，请检查网络后重试</string>
+    <string name="character_ai_label">AI 生成 · 虚拟人物</string>
+    <string name="character_relationship">知己</string>
+    <string name="character_write">给 TA 写信</string>
+    <string name="character_thread">往来信件</string>
+    <string name="character_topics">常聊的话题</string>
+    <string name="character_locked">尚未解锁</string>
+
+    <string name="letter_write_title">写信</string>
+    <string name="letter_hint">慢慢写，想说什么就写什么，最多 2000 字……</string>
+    <string name="letter_chars">%1$d / 2000 字</string>
+    <string name="letter_send">寄出这封信</string>
+    <string name="letter_sending">正在寄出…</string>
+    <string name="letter_sent">信已寄出，对方会慢慢回信</string>
+    <string name="letter_reply_due_today">预计回信：今天</string>
+    <string name="letter_reply_due">预计回信：%1$s</string>
+    <string name="letter_reply_waiting">回信还在路上，请耐心等一等</string>
+    <string name="letter_ai_label">AI 生成</string>
+    <string name="letter_from_me">我写的</string>
+    <string name="letter_from_friend">TA 的回信</string>
+    <string name="letter_mark_read">标记已读</string>
+    <string name="letter_read">已读</string>
+    <string name="letter_thread_empty">还没有往来信件，写下第一封信吧</string>
+    <string name="letter_first_note">这是你们的第一封信，对方今天就会回信。</string>
+
+    <string name="account_title">账号</string>
+    <string name="account_not_logged_in">未登录邮箱（仍可用设备号正常写信）</string>
+    <string name="account_unverified">邮箱未验证（可正常使用；改密码、找回密码需先验证）</string>
+    <string name="account_verified">邮箱已验证</string>
+    <string name="account_login_register">登录 / 注册</string>
+    <string name="account_manage">管理账号</string>
+    <string name="account_login">登录</string>
+    <string name="account_register">注册</string>
+    <string name="account_forgot">忘记密码</string>
+    <string name="account_email">邮箱</string>
+    <string name="account_password">密码</string>
+    <string name="account_password_hint">密码（至少 8 位）</string>
+    <string name="account_password_confirm">确认密码</string>
+    <string name="account_age">年龄</string>
+    <string name="account_age_hint">年龄（未满 14 岁不能注册）</string>
+    <string name="account_captcha">图中验证码</string>
+    <string name="account_captcha_refresh">换一张</string>
+    <string name="account_captcha_loading">验证码加载中…</string>
+    <string name="account_privacy_agree">我已阅读并同意</string>
+    <string name="account_privacy">《隐私协议》</string>
+    <string name="account_send_code">发送验证码</string>
+    <string name="account_code">邮箱验证码（6 位）</string>
+    <string name="account_verify_email">验证邮箱</string>
+    <string name="account_resend">重新发送</string>
+    <string name="account_new_password">新密码（至少 8 位）</string>
+    <string name="account_current_password">当前密码</string>
+    <string name="account_reset_password">重置密码</string>
+    <string name="account_change_password">修改密码</string>
+    <string name="account_logout">退出登录</string>
+    <string name="account_verify_first">请先验证邮箱</string>
+    <string name="account_password_mismatch">两次输入的密码不一致</string>
+
+    <string name="me_membership">会员</string>
+    <string name="me_membership_free">免费 · 第一阶段全部免费</string>
+    <string name="me_membership_plan">免费 1 位笔友 · 每天 1 封信 · 首封当天回，之后每 3 天回信</string>
+    <string name="me_points">积分</string>
+    <string name="me_points_hint">写信 +1 · 读完回信 +1 · 每日登录 +1；100 分解锁 1 位笔友，300 分再解锁 1 位</string>
+    <string name="me_unlocks">解锁进度</string>
+    <string name="messages">消息</string>
+    <string name="messages_empty">暂无新消息，打开 App 时会自动拉取</string>
+    <string name="privacy_policy">隐私协议</string>
+    <string name="about_title">关于</string>
+    <string name="about_text">笔友 · 慢信 + 虚拟笔友：选一位虚拟知己，慢慢写信，慢慢等回信。\n所有人物均为 AI 生成的虚拟人物，不是真人；回信由 AI 生成，并标有「AI 生成」。\n信件内容加密保存，管理员看不到任何单个用户的内容。</string>
+    <string name="version">版本 0.1.0</string>
+
+    <string name="reminder_channel_name">回信提醒</string>
+    <string name="reminder_channel_desc">早上和晚上的回信提醒</string>
+    <string name="reminder_morning_title">笔友的回信可能到了</string>
+    <string name="reminder_morning_text">打开笔友，看看知己给你回了什么</string>
+    <string name="reminder_evening_title">今天给笔友写信了吗？</string>
+    <string name="reminder_evening_text">慢慢写一封信，今晚睡个好觉</string>
+    <string name="notification_permission_text">开启通知后，每天早上 8 点和晚上 8 点会提醒你读信和写信</string>
+</resources>

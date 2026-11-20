@@ -59,6 +59,7 @@
     <button data-tab="dashboard" class="active">仪表盘</button>
     <button data-tab="characters">人物与合规</button>
     <button data-tab="llm">LLM 配置</button>
+    <button data-tab="smtp">邮件配置</button>
     <button data-tab="membership">会员配置</button>
     <button data-tab="messages">消息推送</button>
     <button data-tab="activities">活动管理</button>
@@ -94,6 +95,21 @@
         <option value="zhipu">智谱 GLM</option>
       </select>
       <button class="btn" data-save="llm">保存 LLM 配置</button>
+    </section>
+
+    <section id="tab-smtp">
+      <h2>邮件配置（验证码邮件）</h2>
+      <p class="muted">发件邮箱只用于发送邮箱验证码和找回密码邮件。密码只存服务端数据库，显示为 ******** 表示已配置；留空表示清除。默认阿里企业邮箱 smtp.qiye.aliyun.com:465（SSL）。未配置发件邮箱时，验证码接口返回 503，App 无法发送验证码。</p>
+      <label>SMTP 服务器</label>
+      <input type="text" id="set-smtp.host" placeholder="smtp.qiye.aliyun.com">
+      <label>SMTP 端口</label>
+      <input type="number" id="set-smtp.port" min="1" max="65535" placeholder="465">
+      <label><input type="checkbox" id="set-smtp.ssl"> 使用 SSL（465 端口请勾选；587 端口请取消勾选走 STARTTLS）</label>
+      <label>发件邮箱（用户名）</label>
+      <input type="text" id="set-smtp.user" placeholder="name@example.com" autocomplete="off">
+      <label>邮箱密码 / 客户端安全密码</label>
+      <input type="password" id="set-smtp.password" autocomplete="off">
+      <button class="btn" data-save="smtp">保存邮件配置</button>
     </section>
 
     <section id="tab-membership">
@@ -168,6 +184,11 @@ async function loadAll() {
     setVal(`set-${key}`, key); setVal(`set-${model}`, model); setVal(`set-llm.${id}.enabled`, `llm.${id}.enabled`, true);
   });
   setVal("set-llm.default_provider", "llm.default_provider");
+  setVal("set-smtp.host", "smtp.host");
+  setVal("set-smtp.port", "smtp.port");
+  setVal("set-smtp.ssl", "smtp.ssl", true);
+  setVal("set-smtp.user", "smtp.user");
+  setVal("set-smtp.password", "smtp.password");
   setVal("set-membership.price_member_cny", "membership.price_member_cny");
   setVal("set-membership.price_premium_cny", "membership.price_premium_cny");
   setVal("set-membership.paywalled", "membership.paywalled", true);
@@ -200,6 +221,8 @@ document.querySelectorAll("[data-save]").forEach(btn => btn.addEventListener("cl
       });
       keys.push(["set-llm.default_provider", "llm.default_provider"]);
       await saveSettings(keys);
+    } else if (tab === "smtp") {
+      await saveSettings([["set-smtp.host", "smtp.host"], ["set-smtp.port", "smtp.port"], ["set-smtp.ssl", "smtp.ssl", true], ["set-smtp.user", "smtp.user"], ["set-smtp.password", "smtp.password"]]);
     } else if (tab === "membership") {
       await saveSettings([["set-membership.price_member_cny", "membership.price_member_cny"], ["set-membership.price_premium_cny", "membership.price_premium_cny"], ["set-membership.paywalled", "membership.paywalled", true]]);
     } else if (tab === "memory") {

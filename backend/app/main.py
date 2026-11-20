@@ -20,16 +20,17 @@ numbers, never user text. A reply is only 'replied' when the LLM
 actually generated and stored it — without an LLM key, letters stay
 queued (never a fake reply).
 """
+import secrets
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
-from . import admin, database, evolution
+from . import admin, database, email_auth, evolution
 from .auth import get_current_device, issue_token
 from .characters import BY_ID, public_character
 from .content_filter import validate_user_letter
@@ -86,6 +87,47 @@ class ProcessDueIn(BaseModel):
 
 class ReferralIn(BaseModel):
     referred_device_id: str = Field(..., min_length=1, max_length=128)
+
+
+class RegisterIn(BaseModel):
+    email: str
+    password: str = Field(..., min_length=1, max_length=128)
+    age: int | None = Field(None, ge=1, le=120)
+    captcha_token: str | None = None
+    captcha_text: str | None = None
+
+
+class LoginEmailIn(BaseModel):
+    email: str
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class SendCodeIn(BaseModel):
+    email: str
+    purpose: str = "verify"
+    captcha_token: str | None = None
+    captcha_text: str | None = None
+
+
+class VerifyIn(BaseModel):
+    email: str
+    code: str
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str | None = None
+    code: str | None = None
+    new_password: str = Field(..., min_length=1, max_length=128)
+
+
+class ForgotPasswordIn(BaseModel):
+    email: str
+
+
+class ResetPasswordIn(BaseModel):
+    email: str
+    code: str
+    new_password: str = Field(..., min_length=1, max_length=128)
 
 
 # ---------- helpers ----------
@@ -150,6 +192,245 @@ def auth_device(body: DeviceAuthIn):
 def auth_login(device_id: str = Depends(get_current_device)):
     awarded = database.award_point(device_id, "login")
     return {"device_id": device_id, "points_awarded": awarded, "points": database.points_balance(device_id)}
+
+
+# ---------- email accounts (M1) ----------
+
+def _client_ip(request: Request) -> str:
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _require_captcha_or_400(token: str | None, text: str | None) -> None:
+    ok, reason = email_auth.check_captcha(token, text)
+    if not ok:
+        detail = {
+            "missing": "需要图形验证码",
+            "invalid": "图形验证码无效或已过期",
+            "expired": "图形验证码已过期",
+            "wrong": "图形验证码错误",
+        }.get(reason, "图形验证码错误")
+        raise HTTPException(status_code=400, detail=detail)
+
+
+@app.post("/api/v1/auth/register")
+def auth_register(body: RegisterIn):
+    email = email_auth.normalize_email(body.email)
+    if not email_auth.valid_email(email):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="密码至少 8 位")
+    _require_captcha_or_400(body.captcha_token, body.captcha_text)
+    if database.get_user_by_email(email):
+        raise HTTPException(status_code=400, detail="该邮箱已注册")
+    device_id = "email-" + secrets.token_hex(12)
+    try:
+        device = database.get_or_create_device(device_id, age=body.age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    database.create_user(email, email_auth.hash_password(body.password), body.age, device_id)
+    database.award_point(device_id, "login")
+    return {
+        "token": issue_token(device_id),
+        "device_id": device_id,
+        "email": email,
+        "email_verified": False,
+        "plan": device["plan"],
+        "minor_mode": bool(device["minor_mode"]),
+        "age": device["age"],
+    }
+
+
+@app.post("/api/v1/auth/login-email")
+def auth_login_email(body: LoginEmailIn):
+    email = email_auth.normalize_email(body.email)
+    user = database.get_user_by_email(email)
+    if not user or not email_auth.verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="邮箱或密码错误")
+    device_id = user["device_id"]
+    database.award_point(device_id, "login")
+    device = database.get_device(device_id)
+    return {
+        "token": issue_token(device_id),
+        "device_id": device_id,
+        "email": email,
+        "email_verified": bool(user["email_verified"]),
+        "plan": device["plan"] if device else "free",
+    }
+
+
+@app.get("/api/v1/auth/captcha")
+def auth_captcha():
+    token, _code, png = email_auth.create_captcha()
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"X-Captcha-Token": token, "Cache-Control": "no-store"},
+    )
+
+
+def _captcha_required(email: str, ip: str) -> bool:
+    """Captcha is required on send-code after 2 failed send-code
+    attempts for that email or that IP within an hour."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    return (
+        database.count_send_failures(email=email, since=since) >= 2
+        or database.count_send_failures(ip=ip, since=since) >= 2
+    )
+
+
+def _request_code(email_raw: str, purpose: str, ip: str,
+                  captcha_token: str | None, captcha_text: str | None,
+                  captcha_gate: bool = True) -> dict:
+    """Shared send-code / forgot-password flow. Responses are generic
+    and never reveal whether an email is registered."""
+    email = email_auth.normalize_email(email_raw)
+    if not email_auth.valid_email(email) or purpose not in ("verify", "reset"):
+        database.record_send_failure(email, ip)
+        raise HTTPException(status_code=400, detail="请求无效")
+    if captcha_gate and _captcha_required(email, ip):
+        try:
+            _require_captcha_or_400(captcha_token, captcha_text)
+        except HTTPException:
+            database.record_send_failure(email, ip)
+            raise
+    if not email_auth.smtp_configured():
+        raise HTTPException(status_code=503, detail="email not configured")
+    now = datetime.now(timezone.utc)
+    # per-email 1/min, 5/hour; per-IP 10/hour
+    since_min = (now - timedelta(minutes=1)).isoformat()
+    since_hour = (now - timedelta(hours=1)).isoformat()
+    retry_after = None
+    if database.count_send_events(email=email, since=since_min) >= 1:
+        last = database.latest_send_event_at(email, since_min)
+        try:
+            elapsed = (now - datetime.fromisoformat(last)).total_seconds()
+        except (TypeError, ValueError):
+            elapsed = 0
+        retry_after = max(1, int(60 - elapsed))
+    elif database.count_send_events(email=email, since=since_hour) >= 5:
+        retry_after = 3600
+    elif database.count_send_events(ip=ip, since=since_hour) >= 10:
+        retry_after = 3600
+    if retry_after is not None:
+        database.record_send_failure(email, ip)
+        raise HTTPException(
+            status_code=429,
+            detail="发送过于频繁，请稍后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
+    database.record_send_event(email, ip)
+    user = database.get_user_by_email(email)
+    if user is not None:
+        code = email_auth.create_verification_code(email, purpose)
+        try:
+            email_auth.send_verification_email(email, code, purpose)
+        except email_auth.SmtpNotConfigured as e:
+            raise HTTPException(status_code=503, detail="email not configured") from e
+        except Exception as e:
+            raise HTTPException(status_code=503, detail="邮件发送失败，请稍后再试") from e
+    return {"ok": True, "message": "验证码已发送"}
+
+
+@app.post("/api/v1/auth/send-code")
+def auth_send_code(body: SendCodeIn, request: Request):
+    return _request_code(body.email, body.purpose, _client_ip(request),
+                         body.captcha_token, body.captcha_text)
+
+
+@app.post("/api/v1/auth/verify")
+def auth_verify(body: VerifyIn):
+    email = email_auth.normalize_email(body.email)
+    ok, reason = email_auth.check_code(email, body.code)
+    if not ok:
+        detail = {
+            "missing": "验证码错误或已过期",
+            "expired": "验证码已过期，请重新获取",
+            "too_many_attempts": "验证码尝试次数过多，请重新获取",
+            "wrong": "验证码错误",
+        }.get(reason, "验证码错误或已过期")
+        raise HTTPException(status_code=400, detail=detail)
+    email_auth.consume_code(email)
+    database.set_user_verified(email)
+    return {"ok": True, "email_verified": True}
+
+
+@app.post("/api/v1/auth/change-password")
+def auth_change_password(body: ChangePasswordIn, device_id: str = Depends(get_current_device)):
+    user = database.get_user_by_device(device_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="该账号未绑定邮箱，请先注册邮箱账号")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="新密码至少 8 位")
+    if body.code:
+        ok, reason = email_auth.check_code(user["email"], body.code)
+        if not ok:
+            raise HTTPException(status_code=400, detail="验证码错误或已过期")
+        email_auth.consume_code(user["email"])
+    elif not user["email_verified"]:
+        raise HTTPException(status_code=400, detail="邮箱未验证，请使用验证码修改密码")
+    elif not body.current_password or not email_auth.verify_password(
+        body.current_password, user["password_hash"]
+    ):
+        raise HTTPException(status_code=400, detail="当前密码错误")
+    database.update_user_password(user["email"], email_auth.hash_password(body.new_password))
+    return {"ok": True}
+
+
+@app.post("/api/v1/auth/forgot-password")
+def auth_forgot_password(body: ForgotPasswordIn, request: Request):
+    # Forgot-password carries no captcha fields; the captcha gate
+    # applies to send-code only. Rate limits + generic response still apply.
+    return _request_code(body.email, "reset", _client_ip(request), None, None,
+                         captcha_gate=False)
+
+
+@app.post("/api/v1/auth/reset-password")
+def auth_reset_password(body: ResetPasswordIn):
+    email = email_auth.normalize_email(body.email)
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="新密码至少 8 位")
+    user = database.get_user_by_email(email)
+    if user is None:
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    if not user["email_verified"] and not user["verified_at"]:
+        raise HTTPException(
+            status_code=400, detail="该邮箱未验证，无法找回密码"
+        )
+    ok, reason = email_auth.check_code(email, body.code)
+    if not ok:
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    email_auth.consume_code(email)
+    database.invalidate_codes_for_email(email)
+    database.update_user_password(email, email_auth.hash_password(body.new_password))
+    return {"ok": True}
+
+
+# ---------- privacy ----------
+
+@app.get("/api/v1/privacy")
+def privacy_json():
+    return {"text": email_auth.PRIVACY_TEXT, "updated_at": email_auth.PRIVACY_UPDATED_AT}
+
+
+@app.get("/privacy", include_in_schema=False)
+def privacy_page():
+    paras = "".join(
+        f"<p>{line}</p>" for line in email_auth.PRIVACY_TEXT.split("\n") if line.strip()
+    )
+    html = (
+        "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>笔友 · 隐私说明</title>"
+        "<style>body{font-family:-apple-system,\"PingFang SC\",\"Microsoft YaHei\",sans-serif;"
+        "max-width:640px;margin:40px auto;padding:0 20px;line-height:1.8;color:#333;"
+        "background:#F2F0EB}h1{font-size:20px;color:#2F5D50}</style></head>"
+        f"<body><h1>笔友 · 隐私说明</h1>{paras}"
+        f"<p style=\"color:#999;font-size:13px\">更新于 {email_auth.PRIVACY_UPDATED_AT}</p>"
+        "</body></html>"
+    )
+    return HTMLResponse(content=html)
 
 
 # ---------- characters ----------

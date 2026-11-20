@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Warm cream + orange palette, matching the app icon -->
+    <color name="cream_bg">#FFF7E8</color>
+    <color name="cream_surface">#FFFDF6</color>
+    <color name="cream_card">#FFFBF0</color>
+    <color name="orange_primary">#E8833A</color>
+    <color name="orange_light">#F6A96B</color>
+    <color name="orange_dark">#C96A1E</color>
+    <color name="amber_dark">#8A5A2B</color>
+    <color name="text_dark">#3D2C1E</color>
+    <color name="text_muted">#8C7A66</color>
+    <color name="divider">#F0DFC8</color>
+    <color name="success">#5A9A5A</color>
+</resources>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder sunrise mark: sun + path, in the app's warm orange.
+     Replace with the real icon artwork before release (see README.md). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#E8833A"
+        android:pathData="M54,22a14,14 0 1,0 0.1,0Z" />
+    <path
+        android:fillColor="#E8833A"
+        android:pathData="M20,62h68v6H20z" />
+    <path
+        android:fillColor="#F6A96B"
+        android:pathData="M30,74h48v6H30z" />
+    <path
+        android:fillColor="#C96A1E"
+        android:pathData="M40,86h28v6H40z" />
+</vector>

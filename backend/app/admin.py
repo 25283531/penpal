@@ -163,6 +163,16 @@ def _validate_settings(values: dict) -> dict[str, str]:
             if not 1 <= n <= 7:
                 raise HTTPException(status_code=400, detail="consolidation interval must be 1-7 days")
             cleaned[key] = str(n)
+        elif key == "smtp.port":
+            try:
+                n = int(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="SMTP port must be an integer")
+            if not 1 <= n <= 65535:
+                raise HTTPException(status_code=400, detail="SMTP port must be 1-65535")
+            cleaned[key] = str(n)
+        elif key == "smtp.ssl":
+            cleaned[key] = "1" if raw in (True, 1, "1", "true", "on") else "0"
         elif key in ("membership.price_member_cny", "membership.price_premium_cny"):
             try:
                 n = float(raw)

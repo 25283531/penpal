@@ -173,6 +173,47 @@ CREATE TABLE IF NOT EXISTS violation_stats (
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (date, type)
 );
+-- M1: email accounts (one device_id bound per user, created at registration)
+CREATE TABLE IF NOT EXISTS users (
+    email TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    verified_at TEXT,
+    age INTEGER,
+    device_id TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL
+);
+-- M1: email verification / reset codes (SHA256 of the code only, never the code)
+CREATE TABLE IF NOT EXISTS verification_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+-- M1: one-time image captchas (SHA256 of the code, 5-min expiry, single use)
+CREATE TABLE IF NOT EXISTS captchas (
+    token TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+-- M1: send-code events (rate limits) and failures (captcha gating)
+CREATE TABLE IF NOT EXISTS email_send_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS email_send_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 DEFAULT_SETTINGS: dict[str, str] = {
@@ -192,6 +233,11 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "membership.price_member_cny": "9.9",
     "membership.price_premium_cny": "19.9",
     "membership.paywalled": "0",
+    "smtp.host": "smtp.qiye.aliyun.com",
+    "smtp.port": "465",
+    "smtp.ssl": "1",
+    "smtp.user": "",
+    "smtp.password": "",
     "memory.evolution_enabled": "1",
     "memory.reflection_enabled": "1",
     "memory.consolidation_interval_days": "1",
@@ -203,6 +249,7 @@ SECRET_SETTINGS = {
     "hunyuan.api_key",
     "siliconflow.api_key",
     "zhipu.api_key",
+    "smtp.password",
 }
 
 HIDDEN_SETTINGS = {"admin.password_hash", "auth.jwt_secret"}
@@ -1304,3 +1351,173 @@ def dashboard_stats() -> dict:
         "characters": letters_by_character(),
         "violations": violation_summary(),
     }
+
+# ---- M1: email users / verification codes / captchas / rate limits ----
+
+def create_user(email: str, password_hash: str, age: int | None, device_id: str) -> dict:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO users (email, password_hash, email_verified, verified_at,"
+            " age, device_id, created_at) VALUES (?, ?, 0, NULL, ?, ?, ?)",
+            (email, password_hash, age, device_id, _now_iso()),
+        )
+    return get_user_by_email(email)
+
+
+def get_user_by_email(email: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT email, password_hash, email_verified, verified_at, age,"
+            " device_id, created_at FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_device(device_id: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT email, password_hash, email_verified, verified_at, age,"
+            " device_id, created_at FROM users WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_user_verified(email: str) -> dict | None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE users SET email_verified = 1, verified_at = ? WHERE email = ?",
+            (_now_iso(), email),
+        )
+    return get_user_by_email(email)
+
+
+def update_user_password(email: str, password_hash: str) -> dict | None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE email = ?",
+            (password_hash, email),
+        )
+    return get_user_by_email(email)
+
+
+def create_verification_code(email: str, purpose: str, code_hash: str, expires_at: str) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO verification_codes (email, purpose, code_hash, expires_at,"
+            " attempts, used, created_at) VALUES (?, ?, ?, ?, 0, 0, ?)",
+            (email, purpose, code_hash, expires_at, _now_iso()),
+        )
+        return cur.lastrowid
+
+
+def get_latest_unused_code(email: str) -> dict | None:
+    """Latest unused code for this email, any purpose (verify/reset share
+    the same 6-digit code channel)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, email, purpose, code_hash, expires_at, attempts, used, created_at"
+            " FROM verification_codes WHERE email = ? AND used = 0"
+            " ORDER BY id DESC LIMIT 1",
+            (email,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def increment_code_attempts(code_id: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?",
+            (code_id,),
+        )
+
+
+def mark_code_used(code_id: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE verification_codes SET used = 1 WHERE id = ?", (code_id,)
+        )
+
+
+def invalidate_codes_for_email(email: str) -> None:
+    """Mark every code for this email used (e.g. after a password reset)."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE verification_codes SET used = 1 WHERE email = ?", (email,)
+        )
+
+
+def store_captcha(token: str, code_hash: str, expires_at: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO captchas (token, code_hash, expires_at, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (token, code_hash, expires_at, _now_iso()),
+        )
+
+
+def consume_captcha(token: str) -> dict | None:
+    """Fetch + delete a captcha in one step: single use, success or fail."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT token, code_hash, expires_at, created_at FROM captchas WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if row:
+            conn.execute("DELETE FROM captchas WHERE token = ?", (token,))
+    return dict(row) if row else None
+
+
+def record_send_event(email: str, ip: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO email_send_events (email, ip, created_at) VALUES (?, ?, ?)",
+            (email, ip, _now_iso()),
+        )
+
+
+def count_send_events(email: str | None = None, ip: str | None = None, since: str = "") -> int:
+    q = "SELECT COUNT(*) FROM email_send_events WHERE created_at >= ?"
+    params: list = [since]
+    if email is not None:
+        q += " AND email = ?"
+        params.append(email)
+    if ip is not None:
+        q += " AND ip = ?"
+        params.append(ip)
+    with connect() as conn:
+        row = conn.execute(q, params).fetchone()
+    return row[0]
+
+
+def latest_send_event_at(email: str, since: str = "") -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT created_at FROM email_send_events WHERE email = ? AND created_at >= ?"
+            " ORDER BY id DESC LIMIT 1",
+            (email, since),
+        ).fetchone()
+    return row["created_at"] if row else None
+
+
+def record_send_failure(email: str, ip: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO email_send_failures (email, ip, created_at) VALUES (?, ?, ?)",
+            (email, ip, _now_iso()),
+        )
+
+
+def count_send_failures(email: str | None = None, ip: str | None = None, since: str = "") -> int:
+    q = "SELECT COUNT(*) FROM email_send_failures WHERE created_at >= ?"
+    params: list = [since]
+    if email is not None:
+        q += " AND email = ?"
+        params.append(email)
+    if ip is not None:
+        q += " AND ip = ?"
+        params.append(ip)
+    with connect() as conn:
+        row = conn.execute(q, params).fetchone()
+    return row[0]
