@@ -48,7 +48,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-private enum class AuthMode { LOGIN, REGISTER, FORGOT }
+// Public: AccountViewModel exposes StateFlow<AuthMode> and setMode(AuthMode)
+// publicly, so the type itself must be public (was `private`, which broke
+// the CI Kotlin build: "public exposes its private-in-file type").
+enum class AuthMode { LOGIN, REGISTER, FORGOT }
 
 class AccountViewModel(
     private val repository: PenpalRepository,
