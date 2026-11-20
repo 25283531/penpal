@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,13 +44,14 @@ import com.junze.penpal.data.api.LetterDto
 import com.junze.penpal.data.prefs.SettingsStore
 import com.junze.penpal.data.repository.PenpalRepository
 import com.junze.penpal.ui.components.EmptyBox
+import com.junze.penpal.ui.components.expectedReplyText
+import com.junze.penpal.ui.components.formatDateTimeShanghai
 import com.junze.penpal.ui.components.userMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.time.LocalDate
 
 class HomeViewModel(
     private val repository: PenpalRepository,
@@ -107,14 +107,24 @@ class HomeViewModel(
     }
 }
 
-/** "预计回信：今天" / "预计回信：2026-11-23" — reply_due_at is YYYY-MM-DD. */
-fun replyDueText(replyDueAt: String?): String {
-    if (replyDueAt.isNullOrBlank()) return ""
-    return try {
-        val due = LocalDate.parse(replyDueAt.take(10))
-        if (due <= LocalDate.now()) "预计回信：今天" else "预计回信：$replyDueAt"
-    } catch (_: Exception) {
-        "预计回信：$replyDueAt"
+/**
+ * Kept for callers in LettersScreen: prefers the backend's
+ * expected_reply_at (ISO 8601), falls back to reply_due_at.
+ * "预计今天回信" / "预计 M月d日 回信" (Asia/Shanghai).
+ */
+fun replyDueText(replyDueAt: String?): String =
+    expectedReplyText(expectedReplyAt = null, replyDueAt = replyDueAt)
+
+/** Read-time line for one timeline row (Asia/Shanghai, never invented). */
+fun letterReadLine(letter: LetterDto): String {
+    return if (letter.direction == "ai") {
+        val readAt = letter.userReadAt ?: letter.readAt
+        if (readAt.isNullOrBlank()) "我读信：未读"
+        else "我读信：${formatDateTimeShanghai(readAt)}"
+    } else {
+        val readAt = letter.characterReadAt
+        if (readAt.isNullOrBlank()) "对方读信：尚未读信"
+        else "对方读信：${formatDateTimeShanghai(readAt)}"
     }
 }
 
@@ -122,10 +132,9 @@ fun replyDueText(replyDueAt: String?): String {
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
-    onCharacterClick: (String) -> Unit,
     onLetterClick: (Int) -> Unit,
     onVerifyClick: () -> Unit,
-    onCharactersClick: () -> Unit
+    onRefreshUnread: () -> Unit = {}
 ) {
     val characters by viewModel.characters.collectAsState()
     val letters by viewModel.letters.collectAsState()
@@ -145,7 +154,8 @@ fun HomeScreen(
 
     // Unverified users are never blocked — just a gentle banner.
     val showVerifyBanner = accountEmail != null && !emailVerified
-    val unlocked = characters.filter { it.unlocked }
+    // Newest first: Room already orders letters by createdAt DESC.
+    val characterNames = characters.associate { it.id to it.name }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -153,7 +163,10 @@ fun HomeScreen(
             TopAppBar(
                 title = { Text(text = stringResource(R.string.app_name)) },
                 actions = {
-                    IconButton(onClick = { viewModel.refresh() }) {
+                    IconButton(onClick = {
+                        viewModel.refresh()
+                        onRefreshUnread()
+                    }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "刷新")
                     }
                 }
@@ -209,6 +222,8 @@ fun HomeScreen(
                     )
                 }
             }
+            // ---- Letter timeline (no "认识笔友" section here any more:
+            // characters live on the "征友信息" tab) ----
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -216,60 +231,11 @@ fun HomeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = stringResource(R.string.home_characters),
+                        text = stringResource(R.string.home_my_letters),
                         style = MaterialTheme.typography.titleLarge
                     )
                     if (isRefreshing) CircularProgressIndicator()
                 }
-            }
-            if (unlocked.isEmpty() && !isRefreshing) {
-                item {
-                    EmptyBox(
-                        message = stringResource(R.string.characters_empty),
-                        modifier = Modifier.height(80.dp)
-                    )
-                }
-            }
-            items(unlocked, key = { it.id }) { character ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onCharacterClick(character.id) },
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "${character.name} · ${character.occupation ?: ""}",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        character.personality?.let {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = it,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2
-                            )
-                        }
-                    }
-                }
-            }
-            item {
-                Button(
-                    onClick = onCharactersClick,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                ) {
-                    Text(text = stringResource(R.string.home_characters))
-                }
-            }
-            item {
-                Text(
-                    text = stringResource(R.string.home_my_letters),
-                    style = MaterialTheme.typography.titleLarge
-                )
             }
             if (letters.isEmpty() && !isRefreshing) {
                 item {
@@ -279,7 +245,8 @@ fun HomeScreen(
                     )
                 }
             }
-            items(letters.take(10), key = { it.id }) { letter ->
+            items(letters, key = { it.id }) { letter ->
+                val recipient = characterNames[letter.characterId] ?: "笔友"
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -291,9 +258,9 @@ fun HomeScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
                             text = if (letter.direction == "ai") {
-                                stringResource(R.string.letter_from_friend)
+                                "收到 $recipient 的回信"
                             } else {
-                                stringResource(R.string.letter_from_me)
+                                "写给 $recipient"
                             },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary
@@ -305,11 +272,25 @@ fun HomeScreen(
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        val due = replyDueText(letter.replyDueAt)
+                        // Poetic in-transit status, exactly as the backend
+                        // returned it — the client invents no progress.
+                        letter.deliveryStageText?.takeIf { it.isNotBlank() }?.let { stage ->
+                            Text(
+                                text = stage,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
                         Text(
                             text = listOfNotNull(
-                                letter.createdAt?.take(10),
-                                due.takeIf { it.isNotBlank() }
+                                "发信时间：${formatDateTimeShanghai(letter.createdAt)}"
+                                    .takeIf { !letter.createdAt.isNullOrBlank() },
+                                letterReadLine(letter),
+                                expectedReplyText(
+                                    letter.expectedReplyAt,
+                                    letter.replyDueAt
+                                ).takeIf { it.isNotBlank() && letter.direction == "user" }
                             ).joinToString(" · "),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant

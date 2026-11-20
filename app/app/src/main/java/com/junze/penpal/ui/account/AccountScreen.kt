@@ -77,6 +77,19 @@ class AccountViewModel(
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice
 
+    /**
+     * True only right after a successful registration, until the user
+     * picks an exit. Registration already logs the user in (the register
+     * response carries the token — see PenpalRepository.register), so
+     * this is a success state, not a "go verify" dead end.
+     */
+    private val _justRegistered = MutableStateFlow(false)
+    val justRegistered: StateFlow<Boolean> = _justRegistered
+
+    fun dismissRegisterSuccess() {
+        _justRegistered.value = false
+    }
+
     fun setMode(mode: AuthMode) {
         _mode.value = mode
         _notice.value = null
@@ -111,9 +124,12 @@ class AccountViewModel(
             _busy.value = true
             repository.register(email.trim(), password, age, token, captchaText.trim())
                 .onSuccess {
-                    // Registration sends no email (backend); verification is
-                    // done with a code from 账号 → 发送验证码.
-                    _notice.value = "注册成功，请去验证邮箱（发送验证码）"
+                    // Register returns a token (flat AuthResponse), and
+                    // saveAccountSession already stored it: the user IS
+                    // logged in now — no second login call, no re-typing
+                    // the password. Show the success state with exits.
+                    _justRegistered.value = true
+                    _notice.value = null
                 }
                 .onFailure {
                     _notice.value = it.userMessage()
@@ -180,7 +196,10 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.logout()
-                .onSuccess { _notice.value = "已退出登录（仍可用设备号写信）" }
+                .onSuccess {
+                    _justRegistered.value = false
+                    _notice.value = "已退出登录（仍可用设备号写信）"
+                }
                 .onFailure { _notice.value = it.userMessage() }
             _busy.value = false
         }
@@ -196,10 +215,13 @@ class AccountViewModel(
 fun AccountScreen(
     viewModel: AccountViewModel,
     onPrivacyClick: () -> Unit,
+    onGoWrite: () -> Unit,
+    onGoHome: () -> Unit,
     onBack: () -> Unit
 ) {
     val accountEmail by viewModel.accountEmail.collectAsState()
     val emailVerified by viewModel.emailVerified.collectAsState()
+    val justRegistered by viewModel.justRegistered.collectAsState()
     val mode by viewModel.mode.collectAsState()
     val captcha by viewModel.captcha.collectAsState()
     val busy by viewModel.busy.collectAsState()
@@ -434,6 +456,33 @@ fun AccountScreen(
                 }
             } else {
                 // ---- Logged in with an email account ----
+                if (justRegistered) {
+                    // ---- Registration success state ----
+                    item {
+                        Text(
+                            text = "注册成功",
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                    }
+                    item {
+                        Text(
+                            text = "已经自动登录，不用再输一遍密码。邮箱未验证也可以正常使用，验证只是为了改密码 / 找回密码。",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                    item {
+                        Button(
+                            onClick = onGoWrite,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) { Text(text = "先去写信") }
+                    }
+                    item {
+                        OutlinedButton(
+                            onClick = { viewModel.dismissRegisterSuccess() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) { Text(text = "稍后再验证") }
+                    }
+                }
                 item {
                     Text(
                         text = accountEmail!!,
@@ -468,6 +517,20 @@ fun AccountScreen(
                             enabled = !busy && code.length == 6,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
                         ) { Text(text = "验证邮箱") }
+                    }
+                    // The verify page is never a dead end: write first,
+                    // or leave and verify later.
+                    item {
+                        OutlinedButton(
+                            onClick = onGoWrite,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) { Text(text = "先去写信") }
+                    }
+                    item {
+                        TextButton(
+                            onClick = onGoHome,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) { Text(text = "稍后再验证，回到首页") }
                     }
                 } else {
                     item {

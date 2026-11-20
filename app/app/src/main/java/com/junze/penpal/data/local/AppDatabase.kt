@@ -19,6 +19,7 @@ data class CharacterEntity(
     @PrimaryKey val id: String,
     val name: String,
     val age: Int?,
+    val gender: String?,
     val occupation: String?,
     val appearance: String?,
     val personality: String?,
@@ -28,6 +29,10 @@ data class CharacterEntity(
     val relationship: String?,
     val photoUrl: String?,
     val photoStatus: String?,
+    val motto: String?,
+    val city: String?,
+    /** photo urls joined with "\n" (null urls are dropped; UI pads to 3 slots). */
+    val photos: String?,
     val unlocked: Boolean
 )
 
@@ -42,7 +47,12 @@ data class LetterEntity(
     val isFirst: Boolean?,
     val aiGenerated: Boolean?,
     val readAt: String?,
-    val createdAt: String?
+    val createdAt: String?,
+    val userReadAt: String?,
+    val characterReadAt: String?,
+    val expectedReplyAt: String?,
+    val deliveryStage: String?,
+    val deliveryStageText: String?
 )
 
 // ---------- DAOs ----------
@@ -79,7 +89,11 @@ interface LetterDao {
 
 // ---------- Database ----------
 
-@Database(entities = [CharacterEntity::class, LetterEntity::class], version = 1, exportSchema = false)
+// v2 adds character gender/motto/city/photos and letter
+// user_read_at / character_read_at / expected_reply_at /
+// delivery_stage(_text). Pre-release app: destructive migration is fine
+// (the cache is rebuilt from the server on next refresh).
+@Database(entities = [CharacterEntity::class, LetterEntity::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun characterDao(): CharacterDao
     abstract fun letterDao(): LetterDao
@@ -94,7 +108,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "penpal.db"
-                ).build().also { instance = it }
+                ).fallbackToDestructiveMigration().build().also { instance = it }
             }
     }
 }

@@ -28,6 +28,23 @@ PHOTO_BASE = (
     "图上水印“AI 生成 · 虚拟人物”。"
 )
 
+PHOTO_SCENES = ("主生活照", "工作场景", "日常场景")
+
+
+def placeholder_photos() -> list[dict]:
+    """Three life-photo slots. No real photo exists yet: photo_url stays
+    None and is_placeholder is True — never claim a photo was generated.
+    `label` is fixed; `scene` only says which slot this is."""
+    return [
+        {
+            "photo_url": None,
+            "is_placeholder": True,
+            "label": "AI 生成 · 虚拟人物",
+            "scene": scene,
+        }
+        for scene in PHOTO_SCENES
+    ]
+
 CHARACTERS: list[dict] = [
     {
         "id": "P01",
@@ -35,6 +52,9 @@ CHARACTERS: list[dict] = [
         "age": 26,
         "gender": "male",
         "occupation": "助理建筑师",
+        "city": "上海",
+        "motto": "我不擅长安慰人，但擅长陪你把一团乱麻拆开，一件一件说清楚。",
+        "photos": placeholder_photos(),
         "appearance": "短发青年，身材精瘦。黑色短发，178cm、约62kg，平时穿素色衬衫和工装裤，背一个装满速写本的帆布包。",
         "personality": "安静、观察型、理性细腻。话不多，每句都认真想过；不擅长安慰人，擅长把一团乱麻拆开，一件一件说清楚。",
         "hobbies": ["城市速写", "骑行", "老电影", "手冲咖啡", "收集旧地图"],
@@ -60,6 +80,9 @@ CHARACTERS: list[dict] = [
         "age": 29,
         "gender": "female",
         "occupation": "互联网产品经理",
+        "city": "北京",
+        "motto": "焦虑不是你的错，先把它放下来，我们再一条一条想办法。",
+        "photos": placeholder_photos(),
         "appearance": "29 岁女性，日常通勤穿着，神情清醒直接。",
         "personality": "清醒、直接、有同理心。经历过加班、裁员、项目被砍，说话不绕弯，但从不落井下石。",
         "hobbies": ["做饭", "长跑", "看脱口秀", "整理 Notion", "周末去菜市场"],
@@ -85,6 +108,9 @@ CHARACTERS: list[dict] = [
         "age": 34,
         "gender": "male",
         "occupation": "财务分析师",
+        "city": "潍坊",
+        "motto": "算清楚了，心里就不慌了；大账小账，我们一笔一笔慢慢算。",
+        "photos": placeholder_photos(),
         "appearance": "34 岁男性，稳重，日常穿着朴素。",
         "personality": "稳、慢、可靠。数字敏感，生活里却很松弛，相信“算清楚了，心里就不慌了”。",
         "hobbies": ["记账", "钓鱼", "下棋", "修旧收音机", "给孩子讲数学故事"],
@@ -109,6 +135,9 @@ CHARACTERS: list[dict] = [
         "age": 27,
         "gender": "female",
         "occupation": "外企 HR",
+        "city": "杭州",
+        "motto": "很多事不是你的错，你不用现在就想明白，我陪你慢慢说。",
+        "photos": placeholder_photos(),
         "appearance": "27 岁女性，温和，日常通勤穿着。",
         "personality": "温和、敏锐、边界感强。见过很多人的入职和离职，懂得“很多事不是你的错”。",
         "hobbies": ["养绿植", "烘焙", "看传记", "周末爬山"],
@@ -133,6 +162,9 @@ CHARACTERS: list[dict] = [
         "age": 31,
         "gender": "male",
         "occupation": "律师",
+        "city": "武汉",
+        "motto": "先分清事实和感受，再谈能做什么；每句话，我都负责。",
+        "photos": placeholder_photos(),
         "appearance": "31 岁男性，沉稳，日常穿着利落。",
         "personality": "冷静、讲理、护短。说话有分寸，越是情绪大的事，越慢。",
         "hobbies": ["跑步", "读史", "做饭", "收藏钢笔", "周末去旧书市场"],
@@ -165,12 +197,15 @@ UNLOCK_ORDER = [
 
 def public_character(c: dict) -> dict:
     """What the app may show for a character. No internal fields."""
+    photos = c.get("photos") or placeholder_photos()
     return {
         "id": c["id"],
         "name": c["name"],
         "age": c["age"],
         "gender": c["gender"],
         "occupation": c["occupation"],
+        "city": c.get("city"),
+        "motto": c.get("motto"),
         "appearance": c["appearance"],
         "personality": c["personality"],
         "hobbies": c["hobbies"],
@@ -181,4 +216,5 @@ def public_character(c: dict) -> dict:
         "ai_label": "AI 生成 · 虚拟人物",
         "photo_url": c["photo_url"],
         "photo_status": c["photo_status"],
+        "photos": photos,
     }

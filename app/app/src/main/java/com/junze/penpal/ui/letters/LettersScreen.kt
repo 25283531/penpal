@@ -1,7 +1,9 @@
 package com.junze.penpal.ui.letters
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,9 +11,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -39,19 +43,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.junze.penpal.R
 import com.junze.penpal.data.api.CharacterDto
+import com.junze.penpal.data.api.CharacterPhotoDto
 import com.junze.penpal.data.api.LetterDto
 import com.junze.penpal.data.repository.MAX_LETTER_CHARS
 import com.junze.penpal.data.repository.PenpalRepository
 import com.junze.penpal.ui.components.EmptyBox
+import com.junze.penpal.ui.components.expectedReplyText
+import com.junze.penpal.ui.components.formatDateTimeShanghai
 import com.junze.penpal.ui.components.userMessage
-import com.junze.penpal.ui.home.replyDueText
+import com.junze.penpal.ui.home.letterReadLine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -155,6 +164,51 @@ fun CharactersScreen(
     }
 }
 
+/**
+ * Backend returns gender as "male"/"female" (the task brief said "男"/"女";
+ * accept both). Displayed as 男 / 女, never as the English code.
+ */
+fun displayGender(gender: String?): String? = when (gender?.trim()?.lowercase()) {
+    "male", "男" -> "男"
+    "female", "女" -> "女"
+    else -> gender?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * The 3 life-photo slots for a character. The backend returns photo_url
+ * null for now, so every slot is a labelled placeholder — never presented
+ * as a real photo. (No image loader is bundled yet; when photo_url goes
+ * live, a loader must be added before real photos can be shown.)
+ */
+fun CharacterDto.photoSlots(): List<CharacterPhotoDto> {
+    val real = (photos ?: emptyList()).take(3)
+    return real + List(3 - real.size) {
+        CharacterPhotoDto(
+            photoUrl = null,
+            isPlaceholder = true,
+            label = "AI 生成 · 虚拟人物"
+        )
+    }
+}
+
+/** Big placeholder avatar: initial in a circle + the AI label. */
+@Composable
+fun CharacterAvatar(character: CharacterDto, size: androidx.compose.ui.unit.Dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = character.name.firstOrNull()?.toString() ?: "？",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onPrimaryContainer
+        )
+    }
+}
+
 @Composable
 fun CharacterCard(character: CharacterDto, onClick: () -> Unit) {
     Card(
@@ -165,38 +219,53 @@ fun CharacterCard(character: CharacterDto, onClick: () -> Unit) {
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CharacterAvatar(character = character, size = 64.dp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.character_ai_label),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    textAlign = TextAlign.Center
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = character.name,
                     style = MaterialTheme.typography.titleMedium
                 )
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = stringResource(R.string.character_ai_label),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
+                    text = listOfNotNull(
+                        displayGender(character.gender),
+                        character.age?.let { "$it 岁" },
+                        character.occupation
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.bodyMedium
                 )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = listOfNotNull(
-                    character.age?.let { "$it 岁" },
-                    character.occupation
-                ).joinToString(" · "),
-                style = MaterialTheme.typography.bodyMedium
-            )
-            character.personality?.let {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 3
-                )
+                if (!character.hobbies.isNullOrEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "爱好：${character.hobbies!!.joinToString("、")}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2
+                    )
+                }
+                character.motto?.takeIf { it.isNotBlank() }?.let { motto ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "“$motto”",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2
+                    )
+                }
             }
         }
     }
@@ -260,17 +329,56 @@ fun CharacterDetailScreen(
                     )
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "${current.name} · ${current.occupation ?: ""}",
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "${stringResource(R.string.character_relationship)} · " +
-                                stringResource(R.string.character_ai_label),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CharacterAvatar(character = current, size = 96.dp)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = stringResource(R.string.character_ai_label),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = current.name,
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = listOfNotNull(
+                                        displayGender(current.gender),
+                                        current.age?.let { "$it 岁" },
+                                        current.occupation,
+                                        current.city
+                                    ).joinToString(" · "),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "${stringResource(R.string.character_relationship)} · " +
+                                        stringResource(R.string.character_ai_label),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        current.motto?.takeIf { it.isNotBlank() }?.let { motto ->
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "交友宣言",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "“$motto”",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
                         current.appearance?.let {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(text = it, style = MaterialTheme.typography.bodyLarge)
@@ -278,6 +386,19 @@ fun CharacterDetailScreen(
                         current.personality?.let {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(text = it, style = MaterialTheme.typography.bodyLarge)
+                        }
+                        if (!current.hobbies.isNullOrEmpty()) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "兴趣爱好",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = current.hobbies!!.joinToString("、"),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                         if (!current.topics.isNullOrEmpty()) {
                             Spacer(modifier = Modifier.height(12.dp))
@@ -292,6 +413,45 @@ fun CharacterDetailScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+                }
+            }
+            // ---- 3 life photos (placeholders until photo_url goes live) ----
+            item {
+                Text(
+                    text = "生活照",
+                    style = MaterialTheme.typography.titleLarge
+                )
+            }
+            items(current.photoSlots()) { photo ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = photo.scene ?: "生活照占位图",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = photo.label ?: "AI 生成 · 虚拟人物",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "照片尚未上线，这里不是真人照片",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             }
@@ -367,11 +527,21 @@ fun LetterRow(letter: LetterDto, onClick: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium
             )
             Spacer(modifier = Modifier.height(8.dp))
+            letter.deliveryStageText?.takeIf { it.isNotBlank() }?.let { stage ->
+                Text(
+                    text = stage,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
             Text(
                 text = listOfNotNull(
-                    letter.createdAt?.take(10),
-                    replyDueText(letter.replyDueAt).takeIf { it.isNotBlank() },
-                    if (letter.direction == "ai" && letter.readAt == null) "未读" else null
+                    "发信时间：${formatDateTimeShanghai(letter.createdAt)}"
+                        .takeIf { !letter.createdAt.isNullOrBlank() },
+                    letterReadLine(letter),
+                    expectedReplyText(letter.expectedReplyAt, letter.replyDueAt)
+                        .takeIf { it.isNotBlank() && letter.direction == "user" }
                 ).joinToString(" · "),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -392,14 +562,16 @@ class WriteLetterViewModel(
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice
 
-    fun send(characterId: String, text: String, onSent: () -> Unit) {
+    /** The letter just sent (null until a send succeeds). The screen shows
+     * its backend-computed expected reply time instead of popping away. */
+    private val _sentLetter = MutableStateFlow<LetterDto?>(null)
+    val sentLetter: StateFlow<LetterDto?> = _sentLetter
+
+    fun send(characterId: String, text: String) {
         viewModelScope.launch {
             _isSending.value = true
             repository.sendLetter(characterId, text.trim())
-                .onSuccess {
-                    _notice.value = "信已寄出，对方会慢慢回信"
-                    onSent()
-                }
+                .onSuccess { _sentLetter.value = it }
                 .onFailure { _notice.value = it.userMessage() }
             _isSending.value = false
         }
@@ -421,6 +593,7 @@ fun WriteLetterScreen(
     var text by remember { mutableStateOf("") }
     val isSending by viewModel.isSending.collectAsState()
     val notice by viewModel.notice.collectAsState()
+    val sentLetter by viewModel.sentLetter.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(notice) {
@@ -443,6 +616,53 @@ fun WriteLetterScreen(
             )
         }
     ) { padding ->
+        val sent = sentLetter
+        if (sent != null) {
+            // ---- Sent: show the backend's expected reply time + the rules ----
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "信已寄出",
+                    style = MaterialTheme.typography.headlineMedium
+                )
+                val expected = expectedReplyText(sent.expectedReplyAt, sent.replyDueAt)
+                if (expected.isNotBlank()) {
+                    Text(
+                        text = expected,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                sent.deliveryStageText?.takeIf { it.isNotBlank() }?.let { stage ->
+                    Text(
+                        text = stage,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Text(
+                    text = "第一封信对方今天就会回；之后免费每 3 天回一封，会员每天回一封。这不是即时秒回，是慢信，请耐心等一等。",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    text = "回信到了会在首页时间线里出现，也会收到提醒。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = onSent,
+                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                ) {
+                    Text(text = "完成")
+                }
+            }
+            return@Scaffold
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -451,7 +671,7 @@ fun WriteLetterScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "第一封信对方今天就会回；之后免费每 3 天回一封。每天最多寄 1 封信。",
+                text = "第一封信对方今天就会回；之后免费每 3 天回一封，会员每天回一封。这不是即时秒回，是慢信。每天最多寄 1 封信。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -476,7 +696,7 @@ fun WriteLetterScreen(
                 )
             }
             Button(
-                onClick = { viewModel.send(characterId, text) { onSent() } },
+                onClick = { viewModel.send(characterId, text) },
                 enabled = text.isNotBlank() && !isSending,
                 modifier = Modifier.fillMaxWidth().height(48.dp)
             ) {
@@ -514,13 +734,20 @@ class LetterDetailViewModel(
         }
     }
 
-    /** Only AI replies can be marked read (server rule); awards +1 point. */
-    fun markRead() {
+    /** Only AI replies can be marked read (server rule); awards +1 point.
+     * [onMarked] runs after a successful mark so the caller can refresh
+     * the unread badge / timeline. */
+    fun markRead(onMarked: (() -> Unit)? = null) {
         val current = _letter.value ?: return
-        if (current.direction != "ai" || current.readAt != null) return
+        if (current.direction != "ai") return
+        if ((current.userReadAt ?: current.readAt) != null) return
         viewModelScope.launch {
             repository.markLetterRead(current.id)
-                .onSuccess { _letter.value = repository.getLetter(current.id) }
+                .onSuccess {
+                    _letter.value = repository.getLetter(current.id)
+                    repository.refreshLetters()
+                    onMarked?.invoke()
+                }
                 .onFailure { _notice.value = it.userMessage() }
         }
     }
@@ -534,7 +761,8 @@ class LetterDetailViewModel(
 @Composable
 fun LetterDetailScreen(
     viewModel: LetterDetailViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onMarkedRead: () -> Unit = {}
 ) {
     val letter by viewModel.letter.collectAsState()
     val notice by viewModel.notice.collectAsState()
@@ -544,6 +772,17 @@ fun LetterDetailScreen(
         notice?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearNotice()
+        }
+    }
+
+    // Opening a reply marks it read (POST /letters/{id}/read) and refreshes
+    // the timeline + unread badge. The guard in markRead keeps this
+    // idempotent — already-read letters are never re-marked.
+    val currentLetter = letter
+    LaunchedEffect(currentLetter?.id, currentLetter?.direction) {
+        val current = currentLetter ?: return@LaunchedEffect
+        if (current.direction == "ai" && (current.userReadAt ?: current.readAt) == null) {
+            viewModel.markRead { onMarkedRead() }
         }
     }
 
@@ -599,7 +838,7 @@ fun LetterDetailScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = current.createdAt?.take(10) ?: "",
+                            text = formatDateTimeShanghai(current.createdAt),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -617,7 +856,15 @@ fun LetterDetailScreen(
                         text = current.text,
                         style = MaterialTheme.typography.bodyLarge
                     )
-                    val due = replyDueText(current.replyDueAt)
+                    current.deliveryStageText?.takeIf { it.isNotBlank() }?.let { stage ->
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = stage,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    val due = expectedReplyText(current.expectedReplyAt, current.replyDueAt)
                     if (due.isNotBlank() && current.direction == "user") {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
@@ -631,6 +878,12 @@ fun LetterDetailScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        } else {
+                            Text(
+                                text = "第一封当天回，之后免费每 3 天回一封、会员每天回一封；不是即时秒回，是慢信。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                     if (current.direction == "ai" && current.status == "in_transit") {
@@ -641,16 +894,23 @@ fun LetterDetailScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = letterReadLine(current),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             if (current.direction == "ai") {
+                val alreadyRead = (current.userReadAt ?: current.readAt) != null
                 Button(
-                    onClick = { viewModel.markRead() },
-                    enabled = current.readAt == null,
+                    onClick = { viewModel.markRead { onMarkedRead() } },
+                    enabled = !alreadyRead,
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {
                     Text(
-                        text = if (current.readAt == null) {
+                        text = if (!alreadyRead) {
                             stringResource(R.string.letter_mark_read)
                         } else {
                             stringResource(R.string.letter_read)

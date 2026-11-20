@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive icon. The foreground is a simple sunrise placeholder vector.
-     Replace it with real penpal artwork (1600px, cut into mipmap-xxxhdpi
-     etc.) when it exists. -->
+<!-- Adaptive icon. Foreground: original AI-generated artwork (2026-11-20) —
+     vintage postman silhouette with mailbag + envelope, retro postage-stamp
+     perforated border and postmark, warm paper / sepia tones. Single 1600px
+     PNG in drawable-nodpi (no scaling); background is the solid cream
+     @color/cream_bg, which matches the artwork's outer paper tone. -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/cream_bg" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />

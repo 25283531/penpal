@@ -12,6 +12,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -19,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -39,6 +42,7 @@ import com.junze.penpal.ui.account.AccountScreen
 import com.junze.penpal.ui.account.AccountViewModel
 import com.junze.penpal.ui.home.HomeScreen
 import com.junze.penpal.ui.home.HomeViewModel
+import com.junze.penpal.ui.home.UnreadViewModel
 import com.junze.penpal.ui.letters.CharacterDetailScreen
 import com.junze.penpal.ui.letters.CharactersScreen
 import com.junze.penpal.ui.letters.CharactersViewModel
@@ -105,6 +109,25 @@ private fun MainScaffold(app: PenpalApp) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
 
+    // One unread-count source for the Home badge + the screens. Refreshes
+    // on every navigation change (cheap GET; silent on failure) so the
+    // badge is never a locally guessed number.
+    val unreadViewModel: UnreadViewModel = viewModel(
+        factory = vmFactory { UnreadViewModel(app, app.repository) }
+    )
+    val unreadCount by unreadViewModel.unreadCount.collectAsState()
+    LaunchedEffect(navBackStackEntry) { unreadViewModel.refresh() }
+
+    val goTab: (String) -> Unit = { route ->
+        navController.navigate(route) {
+            popUpTo(navController.graph.findStartDestination().id) {
+                saveState = true
+            }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
@@ -112,16 +135,18 @@ private fun MainScaffold(app: PenpalApp) {
                     val selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
                     NavigationBarItem(
                         selected = selected,
-                        onClick = {
-                            navController.navigate(tab.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
+                        onClick = { goTab(tab.route) },
+                        icon = {
+                            if (tab.route == Routes.HOME && unreadCount > 0) {
+                                BadgedBox(
+                                    badge = { Badge { Text(text = unreadCount.toString()) } }
+                                ) {
+                                    Icon(tab.icon, contentDescription = null)
                                 }
-                                launchSingleTop = true
-                                restoreState = true
+                            } else {
+                                Icon(tab.icon, contentDescription = null)
                             }
                         },
-                        icon = { Icon(tab.icon, contentDescription = null) },
                         label = { Text(text = stringResource(tab.labelRes)) }
                     )
                 }
@@ -139,14 +164,11 @@ private fun MainScaffold(app: PenpalApp) {
                 )
                 HomeScreen(
                     viewModel = vm,
-                    onCharacterClick = { id ->
-                        navController.navigate(Routes.characterDetail(id))
-                    },
                     onLetterClick = { id ->
                         navController.navigate(Routes.letterDetail(id))
                     },
                     onVerifyClick = { navController.navigate(Routes.ACCOUNT) },
-                    onCharactersClick = { navController.navigate(Routes.CHARACTERS) }
+                    onRefreshUnread = { unreadViewModel.refresh() }
                 )
             }
             composable(Routes.CHARACTERS) {
@@ -207,7 +229,8 @@ private fun MainScaffold(app: PenpalApp) {
                 LaunchedEffect(letterId) { vm.load(letterId) }
                 LetterDetailScreen(
                     viewModel = vm,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onMarkedRead = { unreadViewModel.refresh() }
                 )
             }
             composable(Routes.ME) {
@@ -227,6 +250,8 @@ private fun MainScaffold(app: PenpalApp) {
                 AccountScreen(
                     viewModel = vm,
                     onPrivacyClick = { navController.navigate(Routes.PRIVACY) },
+                    onGoWrite = { goTab(Routes.CHARACTERS) },
+                    onGoHome = { goTab(Routes.HOME) },
                     onBack = { navController.popBackStack() }
                 )
             }

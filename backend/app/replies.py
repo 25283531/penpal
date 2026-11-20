@@ -53,6 +53,9 @@ def process_due_replies(device_id: str, day: str | None = None) -> dict:
             result["details"].append({"letter_id": letter["id"], "status": "failed", "error": str(e)[:200]})
             continue
         reply = database.create_reply_letter(device_id, letter["character_id"], text)
+        # mark_letter_replied also records character_read_at on the
+        # user's letter (derived: replied_at minus up to 3h, clamped
+        # inside [sent, replied], minute precision — see database.py).
         database.mark_letter_replied(device_id, letter["id"])
         # Consolidation only — do NOT count the reply as an interaction:
         # interaction_count counts user letters (it drives the stage

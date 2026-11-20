@@ -31,7 +31,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .characters import BY_ID, CHARACTERS, UNLOCK_ORDER
+from .characters import BY_ID, CHARACTERS, UNLOCK_ORDER, placeholder_photos
 from .config import settings
 from .crypto import decrypt_or_keep, encrypt_text, is_encrypted
 
@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS characters (
     photo_prompt TEXT NOT NULL,
     photo_url TEXT,
     photo_status TEXT NOT NULL DEFAULT 'pending',
+    city TEXT,
+    motto TEXT,
+    photos TEXT,
     relationship TEXT NOT NULL DEFAULT '知己',
     unlocked_by_default INTEGER NOT NULL DEFAULT 1
 );
@@ -84,6 +87,8 @@ CREATE TABLE IF NOT EXISTS letters (
     is_first INTEGER NOT NULL DEFAULT 0,
     ai_generated INTEGER NOT NULL DEFAULT 0,
     read_at TEXT,
+    user_read_at TEXT,
+    character_read_at TEXT,
     created_at TEXT NOT NULL,
     replied_at TEXT
 );
@@ -267,23 +272,52 @@ def connect() -> sqlite3.Connection:
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+    _migrate_columns()
     _seed_characters()
     _migrate_encryption()
     _seed_content()
 
 
+def _migrate_columns() -> None:
+    """Add columns to a pre-existing DB (fresh DBs already get them from
+    SCHEMA). Idempotent: only adds what PRAGMA says is missing, so old
+    data is never lost and old rows simply read NULL for the new fields
+    (e.g. user_read_at / character_read_at are NULL until the event
+    actually happens)."""
+    additions: dict[str, list[tuple[str, str]]] = {
+        "letters": [
+            ("user_read_at", "TEXT"),
+            ("character_read_at", "TEXT"),
+        ],
+        "characters": [
+            ("city", "TEXT"),
+            ("motto", "TEXT"),
+            ("photos", "TEXT"),
+        ],
+    }
+    with connect() as conn:
+        for table, cols in additions.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, coltype in cols:
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
+
+
 def _seed_characters() -> None:
     """Seed P01–P05 from app/characters.py (fixed text). Idempotent:
     existing rows are left alone so a future edit of the seed does not
-    silently rewrite a live character."""
+    silently rewrite a live character — except the three new
+    profile fields (city/motto/photos), which are backfilled where
+    they are still NULL because no live data ever lived in them."""
     with connect() as conn:
         for c in CHARACTERS:
             conn.execute(
                 "INSERT OR IGNORE INTO characters"
                 " (id, name, age, gender, occupation, appearance, personality,"
                 "  hobbies, writing_style, topics, boundaries, life_history,"
-                "  photo_prompt, photo_url, photo_status, relationship,"
-                "  unlocked_by_default) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "  photo_prompt, photo_url, photo_status, city, motto, photos,"
+                "  relationship, unlocked_by_default)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     c["id"], c["name"], c["age"], c["gender"], c["occupation"],
                     c["appearance"], c["personality"],
@@ -291,8 +325,22 @@ def _seed_characters() -> None:
                     c["writing_style"],
                     json.dumps(c["topics"], ensure_ascii=False),
                     c["boundaries"], c["life_history"], c["photo_prompt"],
-                    c["photo_url"], c["photo_status"], c["relationship"],
+                    c["photo_url"], c["photo_status"],
+                    c.get("city"),
+                    c.get("motto"),
+                    json.dumps(c.get("photos") or placeholder_photos(), ensure_ascii=False),
+                    c["relationship"],
                     1 if c["unlocked_by_default"] else 0,
+                ),
+            )
+            conn.execute(
+                "UPDATE characters SET city = ?, motto = ?, photos = ?"
+                " WHERE id = ? AND (city IS NULL OR motto IS NULL OR photos IS NULL)",
+                (
+                    c.get("city"),
+                    c.get("motto"),
+                    json.dumps(c.get("photos") or placeholder_photos(), ensure_ascii=False),
+                    c["id"],
                 ),
             )
 
@@ -636,6 +684,13 @@ def set_device_plan(device_id: str, plan: str) -> dict:
 def _decode_character(row: dict) -> dict:
     row["hobbies"] = json.loads(row.get("hobbies") or "[]")
     row["topics"] = json.loads(row.get("topics") or "[]")
+    try:
+        photos = json.loads(row.get("photos") or "")
+    except (ValueError, TypeError):
+        photos = None
+    if not isinstance(photos, list) or not photos:
+        photos = placeholder_photos()
+    row["photos"] = photos
     row["unlocked_by_default"] = bool(row.get("unlocked_by_default"))
     row["is_ai"] = True
     row["ai_label"] = "AI 生成 · 虚拟人物"
@@ -783,7 +838,8 @@ def reconnect_relationship(device_id: str, character_id: str, max_active: int) -
 
 LETTER_COLUMNS = (
     "id, device_id, character_id, direction, text, status, reply_due_at,"
-    " is_first, ai_generated, read_at, created_at, replied_at"
+    " is_first, ai_generated, read_at, user_read_at, character_read_at,"
+    " created_at, replied_at"
 )
 
 
@@ -889,28 +945,82 @@ def due_user_letters(device_id: str, day: str) -> list[dict]:
     return _decrypt_rows([dict(r) for r in rows])
 
 
+def _character_read_at(created_at: str | None, replied_at: str) -> str | None:
+    """When the character 'read' the user's letter, as recorded when the
+    reply is generated. This is NOT a precise timestamp anyone observed:
+    it is derived as replied_at minus the smaller of 3 hours and half
+    the sent -> replied interval, truncated to the minute, and clamped
+    inside [sent, replied] — so it never claims second-level precision
+    and never lands in the future or before the letter was sent.
+    (Comparisons are minute-granularity by design: when sent and
+    replied fall in the same minute, the truncated value is that minute,
+    which can read up to 59s before the sent second — it still denotes
+    the same minute, not an earlier moment.)"""
+    try:
+        sent = datetime.fromisoformat((created_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        replied = datetime.fromisoformat(replied_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=timezone.utc)
+    if replied.tzinfo is None:
+        replied = replied.replace(tzinfo=timezone.utc)
+    interval = (replied - sent).total_seconds()
+    if interval <= 0:
+        return sent.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+    read_at = replied - timedelta(seconds=min(3 * 3600, interval / 2))
+    read_at = max(sent, min(read_at, replied))
+    return read_at.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def mark_letter_replied(device_id: str, letter_id: int) -> dict | None:
+    letter = get_letter(device_id, letter_id)
+    if not letter:
+        return None
+    replied_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    char_read_at = _character_read_at(letter.get("created_at"), replied_at)
     with connect() as conn:
         conn.execute(
-            "UPDATE letters SET status = 'replied', replied_at = datetime('now') WHERE id = ? AND device_id = ?",
-            (letter_id, device_id),
+            "UPDATE letters SET status = 'replied', replied_at = ?,"
+            " character_read_at = ? WHERE id = ? AND device_id = ?",
+            (replied_at, char_read_at, letter_id, device_id),
         )
     return get_letter(device_id, letter_id)
 
 
 def mark_letter_read(device_id: str, letter_id: int) -> dict | None:
-    """Mark an AI reply as read. Returns the letter; read_at stays set
-    on repeat calls (the +1 read point is awarded once only)."""
+    """Mark an AI reply as read. First call only: user_read_at (and the
+    legacy read_at, kept for backward compatibility) are set once and
+    never overwritten. Returns the letter; the +1 read point is awarded
+    once only (see main.read_letter)."""
     letter = get_letter(device_id, letter_id)
     if not letter or letter["direction"] != "ai":
         return letter
-    if not letter.get("read_at"):
+    if not letter.get("user_read_at") and not letter.get("read_at"):
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with connect() as conn:
             conn.execute(
-                "UPDATE letters SET read_at = datetime('now') WHERE id = ? AND device_id = ?",
-                (letter_id, device_id),
+                "UPDATE letters SET read_at = ?, user_read_at = ?"
+                " WHERE id = ? AND device_id = ?",
+                (now, now, letter_id, device_id),
             )
     return get_letter(device_id, letter_id)
+
+
+def count_unread_replies(device_id: str) -> int:
+    """Delivered AI replies the user has not opened yet. Unread is
+    judged by user_read_at (falling back to the legacy read_at, so
+    replies marked read before this change still count as read)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM letters WHERE device_id = ? AND direction = 'ai'"
+            " AND status = 'delivered' AND user_read_at IS NULL AND read_at IS NULL",
+            (device_id,),
+        ).fetchone()
+    return row[0]
 
 
 # ---- memories (per device x character) ----

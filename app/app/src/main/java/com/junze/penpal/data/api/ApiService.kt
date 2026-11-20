@@ -150,6 +150,14 @@ data class PrivacyDto(
 
 // ---------- Characters (exists in M0) ----------
 
+data class CharacterPhotoDto(
+    val photoUrl: String? = null,
+    val isPlaceholder: Boolean? = null,
+    val label: String? = null,
+    /** Which slot this is, e.g. "主生活照" / "工作场景" / "日常场景". */
+    val scene: String? = null
+)
+
 data class CharacterDto(
     val id: String,
     val name: String,
@@ -166,6 +174,11 @@ data class CharacterDto(
     val aiLabel: String? = null,
     val photoUrl: String? = null,
     val photoStatus: String? = null,
+    /** 交友宣言 (backend: motto). */
+    val motto: String? = null,
+    val city: String? = null,
+    /** 3 张生活照；photo_url 为 null 时是占位 (backend: photos). */
+    val photos: List<CharacterPhotoDto>? = null,
     /** True when this device may write to the character; locked ones are hidden. */
     val unlocked: Boolean = true
 )
@@ -186,7 +199,17 @@ data class LetterDto(
     val aiLabel: String? = null,
     val readAt: String? = null,
     val createdAt: String? = null,
-    val repliedAt: String? = null
+    val repliedAt: String? = null,
+    /** 用户读回信的时间 (ISO 8601)，null = 未读。 */
+    val userReadAt: String? = null,
+    /** 虚拟人物读用户来信的时间 (ISO 8601)，null = 尚未读信。 */
+    val characterReadAt: String? = null,
+    /** 预计回信时间 (ISO 8601)。 */
+    val expectedReplyAt: String? = null,
+    /** 在途阶段英文枚举，如 "delivered" / "on_the_way" / "replying"。 */
+    val deliveryStage: String? = null,
+    /** 诗意中文状态，后端原样返回，客户端不编进度。 */
+    val deliveryStageText: String? = null
 )
 
 data class SendLetterRequest(
@@ -207,7 +230,17 @@ data class ReadLetterResponse(
     val readAt: String? = null,
     val createdAt: String? = null,
     val repliedAt: String? = null,
+    val userReadAt: String? = null,
+    val characterReadAt: String? = null,
+    val expectedReplyAt: String? = null,
+    val deliveryStage: String? = null,
+    val deliveryStageText: String? = null,
     val pointsAwarded: Int? = null
+)
+
+/** GET /api/v1/letters/unread-count returns {"unread_count": N}. */
+data class UnreadCountDto(
+    val unreadCount: Int = 0
 )
 
 // ---------- Membership / points / unlocks (exist in M0) ----------
@@ -351,6 +384,12 @@ interface ApiService {
         @Header("Authorization") token: String,
         @Path("id") id: Int
     ): ReadLetterResponse
+
+    /** Unread AI replies, counted by the backend — never guessed locally. */
+    @GET("letters/unread-count")
+    suspend fun getUnreadCount(
+        @Header("Authorization") token: String
+    ): UnreadCountDto
 
     // ---- Membership / points / unlocks ----
 

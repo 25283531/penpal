@@ -35,7 +35,7 @@ from .auth import get_current_device, issue_token
 from .characters import BY_ID, public_character
 from .content_filter import validate_user_letter
 from .llm import list_llm_providers
-from .membership import PHASE1_FREE, reply_due_date, tier_for
+from .membership import PHASE1_FREE, delivery_stage, expected_reply_at, reply_due_date, tier_for
 from .replies import process_due_replies
 
 
@@ -138,7 +138,46 @@ def _device_plan(device_id: str) -> tuple[dict, dict]:
     return device, tier_for(plan)
 
 
-def _public_letter(letter: dict) -> dict:
+def _public_letter(letter: dict, plan: str = "free") -> dict:
+    """Public view of a letter.
+
+    Read times: `user_read_at` is when the user first opened an AI
+    reply (first call only, never overwritten); `character_read_at` is
+    when the character 'read' the user's letter, derived when the reply
+    was generated (replied_at minus up to 3h, clamped inside
+    [sent, replied], minute precision — never a faked exact second).
+    `read_at` is the legacy alias of `user_read_at`, kept for
+    backward compatibility. Old rows read NULL for both — normal.
+
+    Delivery: user letters carry `expected_reply_at` (ISO 8601 date,
+    from the same reply_due_date rule used at send time — first letter
+    same day, then free +3 days / member+premium +1 day) and
+    `delivery_stage` / `delivery_stage_text`, derived from real state
+    (sent time, due date, whether a reply was generated, now). AI
+    replies carry None for all three.
+    """
+    is_user = letter["direction"] == "user"
+    exp_reply = None
+    stage = stage_text = None
+    if is_user:
+        if letter.get("reply_due_at"):
+            exp_reply = letter["reply_due_at"]
+        else:
+            try:
+                sent_date = date.fromisoformat(str(letter["created_at"])[:10])
+                exp_reply = expected_reply_at(
+                    sent_date, plan, bool(letter.get("is_first"))
+                ).isoformat()
+            except (ValueError, TypeError):
+                exp_reply = None
+        char = database.get_character(letter["character_id"])
+        stage, stage_text = delivery_stage(
+            letter.get("created_at"),
+            letter.get("reply_due_at"),
+            letter.get("status") == "replied",
+            city=(char or {}).get("city") or "",
+            name=(char or {}).get("name") or "",
+        )
     return {
         "id": letter["id"],
         "character_id": letter["character_id"],
@@ -146,10 +185,15 @@ def _public_letter(letter: dict) -> dict:
         "text": letter["text"],
         "status": letter["status"],
         "reply_due_at": letter.get("reply_due_at"),
+        "expected_reply_at": exp_reply,
+        "delivery_stage": stage,
+        "delivery_stage_text": stage_text,
         "is_first": bool(letter.get("is_first")),
         "ai_generated": bool(letter.get("ai_generated")),
         "ai_label": "AI 生成" if letter.get("ai_generated") else None,
         "read_at": letter.get("read_at"),
+        "user_read_at": letter.get("user_read_at"),
+        "character_read_at": letter.get("character_read_at"),
         "created_at": letter["created_at"],
         "replied_at": letter.get("replied_at"),
     }
@@ -498,7 +542,7 @@ def send_letter(body: LetterIn, device_id: str = Depends(get_current_device)):
     database.award_point(device_id, "write", ref_id=str(letter["id"]))
     database.mark_referral_successful(device_id)
     evolution.after_interaction(device_id, character_id, event="letter")
-    return _public_letter(letter)
+    return _public_letter(letter, device["plan"])
 
 
 def _thread_visible(device_id: str, character_id: str) -> None:
@@ -515,14 +559,23 @@ def _thread_visible(device_id: str, character_id: str) -> None:
             )
 
 
+@app.get("/api/v1/letters/unread-count")
+def unread_count(device_id: str = Depends(get_current_device)):
+    """Unread AI replies: delivered and never opened (user_read_at is
+    empty; legacy read_at counts as read too)."""
+    return {"unread_count": database.count_unread_replies(device_id)}
+
+
 @app.get("/api/v1/letters")
 def list_letters(character_id: str | None = None, device_id: str = Depends(get_current_device)):
+    _device, _tier = _device_plan(device_id)
+    plan = _device["plan"] if _device else "free"
     if character_id:
         if not database.get_character(character_id):
             raise HTTPException(status_code=404, detail="character not found")
         _thread_visible(device_id, character_id)
-        return [_public_letter(l) for l in database.list_thread(device_id, character_id)]
-    return [_public_letter(l) for l in database.list_all_letters(device_id)]
+        return [_public_letter(l, plan) for l in database.list_thread(device_id, character_id)]
+    return [_public_letter(l, plan) for l in database.list_all_letters(device_id)]
 
 
 @app.get("/api/v1/letters/{letter_id}")
@@ -531,7 +584,9 @@ def get_letter(letter_id: int, device_id: str = Depends(get_current_device)):
     if not letter:
         raise HTTPException(status_code=404, detail="letter not found")
     _thread_visible(device_id, letter["character_id"])
-    return _public_letter(letter)
+    _device, _tier = _device_plan(device_id)
+    plan = _device["plan"] if _device else "free"
+    return _public_letter(letter, plan)
 
 
 @app.post("/api/v1/letters/{letter_id}/read")
@@ -541,12 +596,17 @@ def read_letter(letter_id: int, device_id: str = Depends(get_current_device)):
         raise HTTPException(status_code=404, detail="letter not found")
     if letter["direction"] != "ai":
         raise HTTPException(status_code=400, detail="only AI replies can be marked read")
-    was_unread = not letter.get("read_at")
+    # Unread = neither the new user_read_at nor the legacy read_at set.
+    # First call records user_read_at and awards +1 (once per letter,
+    # enforced by award_point's ref dedupe); repeats never overwrite.
+    was_unread = not letter.get("user_read_at") and not letter.get("read_at")
     letter = database.mark_letter_read(device_id, letter_id)
     awarded = 0
     if was_unread:
         awarded = database.award_point(device_id, "read", ref_id=str(letter_id))
-    return {**_public_letter(letter), "points_awarded": awarded}
+    _device, _tier = _device_plan(device_id)
+    plan = _device["plan"] if _device else "free"
+    return {**_public_letter(letter, plan), "points_awarded": awarded}
 
 
 @app.post("/api/v1/letters/process-due")

@@ -9,6 +9,7 @@ import com.junze.penpal.data.api.CaptchaResult
 import com.junze.penpal.data.api.ChangePasswordRequest
 import com.junze.penpal.data.api.CharacterDto
 import com.junze.penpal.data.api.DailyLoginResponse
+import com.junze.penpal.data.api.CharacterPhotoDto
 import com.junze.penpal.data.api.DeviceAuthRequest
 import com.junze.penpal.data.api.EmailRequest
 import com.junze.penpal.data.api.GenericOkResponse
@@ -24,6 +25,7 @@ import com.junze.penpal.data.api.ResetPasswordRequest
 import com.junze.penpal.data.api.SendCodeRequest
 import com.junze.penpal.data.api.SendLetterRequest
 import com.junze.penpal.data.api.UnlocksDto
+import com.junze.penpal.data.api.UnreadCountDto
 import com.junze.penpal.data.api.VerifyRequest
 import com.junze.penpal.data.api.VerifyResponse
 import com.junze.penpal.data.local.AppDatabase
@@ -236,10 +238,27 @@ class PenpalRepository(
         withAuth { api, header ->
             api.markLetterRead(header, id).also { updated ->
                 db.letterDao().getById(id)?.let { existing ->
-                    db.letterDao().insert(existing.copy(readAt = updated.readAt))
+                    db.letterDao().insert(
+                        existing.copy(
+                            readAt = updated.readAt ?: updated.userReadAt,
+                            userReadAt = updated.userReadAt ?: updated.readAt,
+                            characterReadAt = updated.characterReadAt
+                                ?: existing.characterReadAt,
+                            expectedReplyAt = updated.expectedReplyAt
+                                ?: existing.expectedReplyAt,
+                            deliveryStage = updated.deliveryStage
+                                ?: existing.deliveryStage,
+                            deliveryStageText = updated.deliveryStageText
+                                ?: existing.deliveryStageText
+                        )
+                    )
                 }
             }
         }
+
+    /** Unread AI replies, counted by the backend (GET /letters/unread-count). */
+    suspend fun getUnreadCount(): Result<Int> =
+        withAuth { api, header -> api.getUnreadCount(header).unreadCount }
 
     // ---------- Membership / points / unlocks / messages / activities ----------
 
@@ -261,29 +280,37 @@ class PenpalRepository(
     // ---------- DTO <-> Entity mapping ----------
 
     private fun CharacterDto.toEntity() = CharacterEntity(
-        id = id, name = name, age = age, occupation = occupation,
+        id = id, name = name, age = age, gender = gender, occupation = occupation,
         appearance = appearance, personality = personality,
         hobbies = hobbies?.joinToString("\n"),
         writingStyle = writingStyle,
         topics = topics?.joinToString("\n"),
         relationship = relationship, photoUrl = photoUrl,
-        photoStatus = photoStatus, unlocked = unlocked
+        photoStatus = photoStatus, motto = motto, city = city,
+        photos = photos?.mapNotNull { it.photoUrl }?.joinToString("\n"),
+        unlocked = unlocked
     )
 
     private fun CharacterEntity.toDto() = CharacterDto(
-        id = id, name = name, age = age, occupation = occupation,
+        id = id, name = name, age = age, gender = gender, occupation = occupation,
         appearance = appearance, personality = personality,
         hobbies = hobbies?.split("\n")?.filter { it.isNotBlank() },
         writingStyle = writingStyle,
         topics = topics?.split("\n")?.filter { it.isNotBlank() },
         relationship = relationship, photoUrl = photoUrl,
-        photoStatus = photoStatus, unlocked = unlocked
+        photoStatus = photoStatus, motto = motto, city = city,
+        photos = photos?.split("\n")?.filter { it.isNotBlank() }
+            ?.map { CharacterPhotoDto(photoUrl = it) },
+        unlocked = unlocked
     )
 
     private fun LetterDto.toEntity() = LetterEntity(
         id = id, characterId = characterId, direction = direction, text = text,
         status = status, replyDueAt = replyDueAt, isFirst = isFirst,
-        aiGenerated = aiGenerated, readAt = readAt, createdAt = createdAt
+        aiGenerated = aiGenerated, readAt = readAt, createdAt = createdAt,
+        userReadAt = userReadAt, characterReadAt = characterReadAt,
+        expectedReplyAt = expectedReplyAt, deliveryStage = deliveryStage,
+        deliveryStageText = deliveryStageText
     )
 
     private fun LetterEntity.toDto() = LetterDto(
@@ -291,6 +318,9 @@ class PenpalRepository(
         status = status, replyDueAt = replyDueAt, isFirst = isFirst,
         aiGenerated = aiGenerated,
         aiLabel = if (aiGenerated == true) "AI 生成" else null,
-        readAt = readAt, createdAt = createdAt
+        readAt = readAt, createdAt = createdAt,
+        userReadAt = userReadAt, characterReadAt = characterReadAt,
+        expectedReplyAt = expectedReplyAt, deliveryStage = deliveryStage,
+        deliveryStageText = deliveryStageText
     )
 }
