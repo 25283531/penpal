@@ -1,0 +1,6 @@
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+# Field-level encryption of user content at rest (Fernet, app/crypto.py):
+# letters/memories/persona summaries are encrypted before SQLite writes.
+cryptography==44.0.0

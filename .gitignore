@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/data/*.db
+backend/data/*.db-*
+backend/data/.encryption.key
+data/*.db
+data/*.db-*
+data/.encryption.key

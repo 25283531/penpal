@@ -1,0 +1,17 @@
+# Penpal backend — run from backend/ on the router.
+# (Same service as the repo-root docker-compose.yml; use one or the other.)
+# Image is built on GitHub Actions and pushed to GHCR; the router only
+# pulls and runs it (no local build, no .env file).
+services:
+  penpal-api:
+    image: ghcr.io/25283531/penpal-backend:latest
+    container_name: penpal-api
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    volumes:
+      # SQLite DB + encryption key persist here (./data).
+      - ./data:/app/data
+    environment:
+      DATA_DIR: /app/data
+      PORT: "7000"

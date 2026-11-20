@@ -1,0 +1,94 @@
+"""Field-level encryption for user content at rest (Fernet).
+
+Everything a user writes and everything the AI writes back is encrypted
+before it reaches SQLite and decrypted only in memory, only for two
+purposes: (a) returning content to its own owner's app, (b) assembling
+that user's LLM context. The admin APIs never see decrypted content.
+
+Key management:
+- The key lives in a standalone file DATA_DIR/.encryption.key (mode 0600),
+  separate from the database. It never enters the DB, never appears in
+  logs, and never travels over any API.
+- First boot generates a fresh random key; later boots load the file.
+- If the key file is lost, the encrypted data is PERMANENTLY unrecoverable
+  — back the key file up separately from the database.
+
+Only these fields are encrypted: letters.text, memories.text,
+persona.summary, devices.emergency_contact. Operational metadata
+stays plaintext (category, dates, counts, device_id, violation flags,
+memory emotion/recall counts, relationship stage, traits) because the
+admin aggregate statistics are computed from it.
+"""
+import os
+from pathlib import Path
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from .config import settings
+
+KEY_FILENAME = ".encryption.key"
+
+_fernet: Fernet | None = None
+
+
+def key_path() -> Path:
+    return settings.DATA_DIR / KEY_FILENAME
+
+
+def load_or_create_key() -> bytes:
+    """Load the key file, or generate + store one (mode 0600) on first boot."""
+    path = key_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        key = path.read_bytes().strip()
+        if key:
+            return key
+    key = Fernet.generate_key()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, key)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return key
+
+
+def get_fernet() -> Fernet:
+    global _fernet
+    if _fernet is None:
+        _fernet = Fernet(load_or_create_key())
+    return _fernet
+
+
+def encrypt_text(plaintext: str) -> str:
+    """Encrypt to a URL-safe base64 token string (stored as TEXT)."""
+    return get_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+
+def decrypt_text(token: str) -> str:
+    """Decrypt a token. Raises InvalidToken for anything that is not a
+    valid token produced by this key."""
+    return get_fernet().decrypt(token.encode("ascii")).decode("utf-8")
+
+
+def is_encrypted(value: str) -> bool:
+    """True if `value` decrypts cleanly with the current key. Used by the
+    startup migration to tell already-encrypted rows from legacy plaintext."""
+    if not value:
+        return False
+    try:
+        decrypt_text(value)
+        return True
+    except (InvalidToken, ValueError):
+        return False
+
+
+def decrypt_or_keep(value: str) -> str:
+    """Decrypt when possible; return legacy plaintext unchanged otherwise.
+    Read paths use this so rows missed by the migration still work."""
+    if not value:
+        return value
+    try:
+        return decrypt_text(value)
+    except (InvalidToken, ValueError):
+        return value
