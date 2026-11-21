@@ -41,6 +41,26 @@ def _new_device(device_id: str, age: int = 30) -> str:
     return r.json()["token"]
 
 
+def _registered(email: str) -> tuple[str, str]:
+    """Register an email account (unverified) and return (token, device_id).
+
+    Sending letters needs a registered account — anonymous devices are
+    read-only (403 anonymous_letter_forbidden) — so every test that
+    sends a letter uses this helper instead of _new_device.
+    """
+    from app import email_auth
+
+    token, code, _png = email_auth.create_captcha()
+    r = client.post("/api/v1/auth/register", json={
+        "email": email, "password": "password123", "age": 30,
+        "display_name": "阿辉",
+        "captcha_token": token, "captcha_text": code,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["token"], body["device_id"]
+
+
 def _send(token: str, character_id: str, text: str = "你好，我是新来的笔友。"):
     return client.post(
         "/api/v1/letters",
@@ -167,7 +187,7 @@ def test_characters_seed_p01_p05_only():
 # ---------- letters: send, turn-taking, daily cap, 2000-char limit ----------
 
 def test_send_letter_first_letter_same_day():
-    tok = _new_device("send-device-001")
+    tok, _device_id = _registered("send@example.com")
     r = _send(tok, "P01", "你好，林澈，我最近在想要不要换工作。")
     assert r.status_code == 201, r.text
     letter = r.json()
@@ -191,7 +211,7 @@ def test_send_letter_first_letter_same_day():
 
 
 def test_letter_2000_char_limit():
-    tok = _new_device("limit-device-001")
+    tok, _device_id = _registered("limit@example.com")
     r = _send(tok, "P01", "字" * 2001)
     assert r.status_code == 400, r.text
     r = _send(tok, "P01", "字" * 2000)
@@ -200,8 +220,8 @@ def test_letter_2000_char_limit():
 
 
 def test_premium_can_send_to_more_characters_same_day():
-    tok = _new_device("premium-device-001")
-    database.set_device_plan("premium-device-001", "premium")
+    tok, device_id = _registered("premium@example.com")
+    database.set_device_plan(device_id, "premium")
     for cid in ("P01", "P02"):
         r = _send(tok, cid, f"你好，{cid}，我是新笔友。")
         assert r.status_code == 201, r.text
@@ -212,7 +232,7 @@ def test_premium_can_send_to_more_characters_same_day():
 
 
 def test_second_character_blocked_while_one_active_free():
-    tok = _new_device("slot-device-001")
+    tok, device_id = _registered("slot@example.com")
     r = _send(tok, "P01", "你好。")
     assert r.status_code == 201
     # The daily cap (1) already blocks a second send today; to test the
@@ -220,13 +240,13 @@ def test_second_character_blocked_while_one_active_free():
     # manipulation is covered by the cap test — here check the slot
     # error path directly at the database layer:
     with pytest.raises(ValueError):
-        database.start_relationship("slot-device-001", "P02", max_active=1)
+        database.start_relationship(device_id, "P02", max_active=1)
 
 
 # ---------- reply scheduling: first same day, then free 3 days ----------
 
 def test_reply_schedule_first_same_day_then_free_3_days():
-    tok = _new_device("sched-device-001")
+    tok, _device_id = _registered("sched@example.com")
     r = _send(tok, "P01", "你好，这是我的第一封信。")
     first_id = r.json()["id"]
 
@@ -257,7 +277,7 @@ def test_reply_schedule_first_same_day_then_free_3_days():
 
     # second letter: NOT due the same day (free = +3 days).
     # Use a fresh device for the 3-day check to avoid the daily cap:
-    tok2 = _new_device("sched-device-002")
+    tok2, device_id2 = _registered("sched2@example.com")
     r = _send(tok2, "P01", "第一封。")
     assert r.status_code == 201
     with patch("app.replies.generate_reply_text", return_value=fake_reply):
@@ -269,7 +289,7 @@ def test_reply_schedule_first_same_day_then_free_3_days():
     conn.execute(
         "UPDATE letters SET created_at = ? WHERE device_id = ? AND direction = 'user'"
         " AND id = (SELECT MAX(id) FROM letters WHERE device_id = ? AND direction = 'user')",
-        (yesterday + "T00:00:00", "sched-device-002", "sched-device-002"),
+        (yesterday + "T00:00:00", device_id2, device_id2),
     )
     conn.commit()
     conn.close()
@@ -289,7 +309,7 @@ def test_reply_schedule_first_same_day_then_free_3_days():
 
 
 def test_process_due_without_llm_queues_never_fakes():
-    tok = _new_device("nollm-device-001")
+    tok, _device_id = _registered("nollm@example.com")
     r = _send(tok, "P01", "你好，没有 LLM 的时候会怎样？")
     assert r.status_code == 201
     r = client.post("/api/v1/letters/process-due", json={}, headers=_auth(tok))
@@ -382,8 +402,8 @@ def test_fading_marks_old_unrecalled_memory_faded():
 # ---------- points / unlocks / referrals ----------
 
 def test_points_login_once_per_day_and_thresholds():
-    tok = _new_device("points-device-001")
-    assert database.points_balance("points-device-001") == 1  # login on registration
+    tok, device_id = _registered("points@example.com")
+    assert database.points_balance(device_id) == 1  # login on registration
     r = client.post("/api/v1/auth/login", headers=_auth(tok))
     assert r.json()["points_awarded"] == 0  # already logged in today
     assert database.points_unlocks(0) == 0
@@ -403,18 +423,18 @@ def test_points_login_once_per_day_and_thresholds():
 
 
 def test_referral_counter_and_success_on_first_letter():
-    inviter = _new_device("referrer-device-001")
-    referred = _new_device("referred-device-001")
+    inviter, inviter_id = _registered("referrer@example.com")
+    referred, referred_id = _registered("referred@example.com")
     r = client.post("/api/v1/referrals",
-                    json={"referred_device_id": "referred-device-001"},
+                    json={"referred_device_id": referred_id},
                     headers=_auth(inviter))
     assert r.status_code == 201, r.text
-    assert database.referral_count("referrer-device-001") == 0  # not yet successful
+    assert database.referral_count(inviter_id) == 0  # not yet successful
     r = _send(referred, "P01", "我是被邀请来的。")
     assert r.status_code == 201
-    assert database.referral_count("referrer-device-001") == 1
+    assert database.referral_count(inviter_id) == 1
     with pytest.raises(ValueError):
-        database.record_referral("referrer-device-001", "referrer-device-001")
+        database.record_referral(inviter_id, inviter_id)
 
 
 def test_unlocks_entitlement_counts():
@@ -434,7 +454,7 @@ def test_unlocks_entitlement_counts():
 # ---------- ending / reconnect / retention ----------
 
 def test_end_reconnect_and_30_day_window():
-    tok = _new_device("end-device-001")
+    tok, device_id = _registered("end@example.com")
     r = _send(tok, "P01", "你好。")
     assert r.status_code == 201
     r = client.post("/api/v1/relationships/P01/end", headers=_auth(tok))
@@ -452,12 +472,12 @@ def test_end_reconnect_and_30_day_window():
 
     # simulate the window passing: relationship list hides it, thread is 410,
     # but the encrypted server data is RETAINED (soft delete only).
-    database.end_relationship("end-device-001", "P01")
+    database.end_relationship(device_id, "P01")
     conn = sqlite3.connect(str(database.settings.DB_PATH))
     past = (date.today() - timedelta(days=1)).isoformat()
     conn.execute(
         "UPDATE relationships SET reconnect_until = ? WHERE device_id = ? AND character_id = 'P01'",
-        (past, "end-device-001"),
+        (past, device_id),
     )
     conn.commit()
     conn.close()
@@ -468,13 +488,13 @@ def test_end_reconnect_and_30_day_window():
     r = client.post("/api/v1/relationships/P01/reconnect", headers=_auth(tok))
     assert r.status_code == 410
     # server-side retention: the letter row is still in the DB
-    assert len(database.list_thread("end-device-001", "P01")) == 1
+    assert len(database.list_thread(device_id, "P01")) == 1
 
 
 # ---------- encryption + admin privacy ----------
 
 def test_encryption_at_rest():
-    tok = _new_device("encrypt-device-001")
+    tok, _device_id = _registered("encrypt@example.com")
     marker = "ENCRYPT-MARKER-5b7e-信件内容"
     r = _send(tok, "P01", marker)
     assert r.status_code == 201

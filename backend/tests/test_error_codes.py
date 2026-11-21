@@ -32,6 +32,26 @@ def _new_device(device_id: str, age: int = 30) -> str:
     return r.json()["token"]
 
 
+def _registered(email: str) -> tuple[str, str]:
+    """Register an email account (unverified) and return (token, device_id).
+
+    Sending letters needs a registered account — anonymous devices are
+    read-only (403 anonymous_letter_forbidden) — so every test that
+    sends a letter uses this helper instead of _new_device.
+    """
+    from app import email_auth
+
+    token, code, _png = email_auth.create_captcha()
+    r = client.post("/api/v1/auth/register", json={
+        "email": email, "password": "password123", "age": 30,
+        "display_name": "阿辉",
+        "captcha_token": token, "captcha_text": code,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["token"], body["device_id"]
+
+
 def _send(token: str, character_id: str, text: str = "你好，我是新来的笔友。"):
     return client.post(
         "/api/v1/letters",
@@ -43,7 +63,7 @@ def _send(token: str, character_id: str, text: str = "你好，我是新来的�
 # ---------- letters: the two live-verified scenarios ----------
 
 def test_duplicate_letter_409_has_code_unanswered_letter():
-    tok = _new_device("err-dup-001")
+    tok, _device_id = _registered("errcodes-dup@example.com")
     r = _send(tok, "P01", "你好，林澈。")
     assert r.status_code == 201, r.text
     r = _send(tok, "P01", "再写一封。")
@@ -56,7 +76,7 @@ def test_duplicate_letter_409_has_code_unanswered_letter():
 
 
 def test_daily_cap_429_has_code_daily_send_limit():
-    tok = _new_device("err-cap-001")
+    tok, _device_id = _registered("errcodes-cap@example.com")
     r = _send(tok, "P01", "你好，林澈。")
     assert r.status_code == 201, r.text
     r = _send(tok, "P02", "你好，沈知遥。")
@@ -70,8 +90,8 @@ def test_active_character_limit_409_has_code():
     # Free tier: 1 active slot. Occupy it via the DB (no letter sent,
     # so the daily cap does not fire first), then a send to a second
     # character must hit the slot rule with its own code.
-    tok = _new_device("err-slot-001")
-    database.start_relationship("err-slot-001", "P01", max_active=1)
+    tok, device_id = _registered("errcodes-slot@example.com")
+    database.start_relationship(device_id, "P01", max_active=1)
     r = _send(tok, "P02", "你好，沈知遥。")
     assert r.status_code == 409, r.text
     body = r.json()
@@ -82,7 +102,7 @@ def test_active_character_limit_409_has_code():
 
 
 def test_letter_validation_codes():
-    tok = _new_device("err-letter-001")
+    tok, _device_id = _registered("errcodes-letter@example.com")
     r = _send(tok, "P01", "   ")
     assert r.status_code == 400, r.text
     assert r.json()["code"] == "letter_empty"
@@ -130,10 +150,12 @@ def test_email_auth_codes():
     assert r.json()["code"] == "invalid_credentials"
     assert r.json()["detail"] == "邮箱或密码错误"
     r = client.post("/api/v1/auth/register",
-                    json={"email": "errcodes-not-an-email", "password": "longenoughpassword"})
+                    json={"email": "errcodes-not-an-email", "password": "longenoughpassword",
+                          "display_name": "阿辉"})
     assert r.status_code == 400 and r.json()["code"] == "invalid_email"
     r = client.post("/api/v1/auth/register",
-                    json={"email": "errcodes-a@example.com", "password": "short"})
+                    json={"email": "errcodes-a@example.com", "password": "short",
+                          "display_name": "阿辉"})
     assert r.status_code == 400 and r.json()["code"] == "password_too_short"
     # Wrong verification code: deterministic regardless of test order.
     r = client.post("/api/v1/auth/verify",
@@ -171,7 +193,7 @@ def test_validation_error_422_has_code():
 # ---------- LLM / reply generation ----------
 
 def test_process_due_no_llm_carries_code():
-    tok = _new_device("err-llm-001")
+    tok, _device_id = _registered("errcodes-llm@example.com")
     r = _send(tok, "P01", "你好，这是我的第一封信。")
     assert r.status_code == 201, r.text
     r = client.post("/api/v1/letters/process-due", json={}, headers=_auth(tok))

@@ -13,6 +13,15 @@ registration; under-14s are refused, 14–17s get minor_mode=1; full
 minor mode is M2). Phase 1 is FREE: everyone is on the free tier, no
 payment is taken; tier checks are enforced anyway.
 
+Anonymous browsing is READ-ONLY: an anonymous device can look around
+but cannot send letters (403 anonymous_letter_forbidden) and earns no
+points. Only email-registered accounts write, collect points and hold
+relationships; unregistered users pick a virtual-world name at
+registration, and data from the anonymous trial period migrates into
+the email account once (see merge_device_data). Unverified email
+accounts can still send — verification only gates password
+change / recovery.
+
 All API keys live in the SQLite settings table (admin console /admin).
 User content (letters / memories / persona summaries) is encrypted at
 rest (see crypto.py); the admin console only ever sees aggregate
@@ -20,6 +29,7 @@ numbers, never user text. A reply is only 'replied' when the LLM
 actually generated and stored it — without an LLM key, letters stay
 queued (never a fake reply).
 """
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -32,7 +42,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from pydantic import BaseModel, Field
 
 from . import admin, database, email_auth, evolution
-from .auth import get_current_device, issue_token
+from .auth import get_current_device, issue_token, verify_token
 from .characters import BY_ID, PHOTO_FILES, public_character
 from .content_filter import validate_user_letter
 from .errors import (
@@ -129,11 +139,35 @@ class RegisterIn(BaseModel):
     age: int | None = Field(None, ge=1, le=120)
     captcha_token: str | None = None
     captcha_text: str | None = None
+    # Virtual-world name (required at registration): 1-20 chars,
+    # Chinese / letters / digits only. This is NOT a real name and is
+    # never identity-checked; pen pals address the user by it.
+    # Length/charset are enforced by _validate_display_name (400
+    # invalid_display_name), not by Pydantic, so the error stays the
+    # stable code instead of a generic 422.
+    display_name: str
+    # Anonymous device whose data migrates into this new email account
+    # (letters / points / relationships / unlocks). After the merge the
+    # anonymous device is retired — the email account is the only
+    # identity from then on.
+    device_id: str | None = None
+    # Anonymous bearer token for the same device (proves ownership);
+    # wins over device_id when both are given.
+    device_token: str | None = None
 
 
 class LoginEmailIn(BaseModel):
     email: str
     password: str = Field(..., min_length=1, max_length=128)
+    # Anonymous device whose data should be merged into this email
+    # account on login (one-time migration, anonymous device retired;
+    # see RegisterIn).
+    device_id: str | None = None
+    device_token: str | None = None
+
+
+class DisplayNameIn(BaseModel):
+    display_name: str  # validated by _validate_display_name (see RegisterIn)
 
 
 class SendCodeIn(BaseModel):
@@ -256,7 +290,10 @@ def auth_device(body: DeviceAuthIn):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    database.award_point(device_id, "login")
+    # Anonymous browsing earns no points: only email-registered
+    # accounts collect login points (see _is_registered).
+    if _is_registered(device_id):
+        database.award_point(device_id, "login")
     return {
         "token": issue_token(device["device_id"]),
         "device_id": device["device_id"],
@@ -268,7 +305,8 @@ def auth_device(body: DeviceAuthIn):
 
 @app.post("/api/v1/auth/login")
 def auth_login(device_id: str = Depends(get_current_device)):
-    awarded = database.award_point(device_id, "login")
+    # Anonymous browsing earns no points (see auth_device).
+    awarded = database.award_point(device_id, "login") if _is_registered(device_id) else 0
     return {"device_id": device_id, "points_awarded": awarded, "points": database.points_balance(device_id)}
 
 
@@ -292,6 +330,62 @@ def _require_captcha_or_400(token: str | None, text: str | None) -> None:
         raise ApiError(400, code, detail)
 
 
+def _is_registered(device_id: str) -> bool:
+    """True when this device belongs to an email-registered account
+    (a row in users) — as opposed to a purely anonymous device.
+    Anonymous browsing is read-only: no letters, no points, no
+    relationships. Registered-but-unverified accounts count as
+    registered (verification only gates password change / recovery)."""
+    return database.get_user_by_device(device_id) is not None
+
+
+def _resolve_link_device(device_id: str | None, device_token: str | None) -> str | None:
+    """Anonymous device the client asks to migrate, if any. A
+    device_token (anonymous bearer token) proves ownership and wins; a
+    bare device_id is accepted too — anonymous ids are unguessable
+    client-generated ids and /auth/device already issues a token for
+    any claimed id, so this matches the existing trust model. A token
+    and an id that disagree are refused."""
+    linked = None
+    if device_token:
+        linked = verify_token(device_token.strip())
+    if device_id:
+        did = device_id.strip()
+        if did:
+            if linked is not None and linked != did:
+                raise ApiError(400, "device_mismatch", "device_id 与 device_token 不一致")
+            linked = did
+    return linked
+
+
+# Virtual-world name: 1-20 chars, Chinese / letters / digits only.
+# No real-name check is ever done; the name is only how pen pals
+# address the user.
+_DISPLAY_NAME_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9]{1,20}$")
+
+
+def _validate_display_name(value: object) -> str:
+    name = value.strip() if isinstance(value, str) else ""
+    if not _DISPLAY_NAME_RE.match(name):
+        raise ApiError(
+            400, "invalid_display_name",
+            "虚拟世界姓名为 1-20 字，仅限中文、字母、数字",
+        )
+    return name
+
+
+def _public_profile(device_id: str) -> dict:
+    device = database.get_device(device_id)
+    user = database.get_user_by_device(device_id)
+    return {
+        "device_id": device_id,
+        "email": user["email"] if user else None,
+        "display_name": user["display_name"] if user else None,
+        "email_verified": bool(user["email_verified"]) if user else False,
+        "plan": device["plan"] if device else "free",
+    }
+
+
 @app.post("/api/v1/auth/register")
 def auth_register(body: RegisterIn):
     email = email_auth.normalize_email(body.email)
@@ -302,21 +396,41 @@ def auth_register(body: RegisterIn):
     _require_captcha_or_400(body.captcha_token, body.captcha_text)
     if database.get_user_by_email(email):
         raise ApiError(400, "email_already_registered", "该邮箱已注册")
+    display_name = _validate_display_name(body.display_name)
+    linked = _resolve_link_device(body.device_id, body.device_token)
+    if linked is not None:
+        other = database.get_user_by_device(linked)
+        if other is not None:
+            raise ApiError(409, "device_already_bound", "该设备已绑定其他邮箱账号")
+    # The email account is a fresh "email-" device: the only identity
+    # from now on. Anonymous data migrates into it (deduped, idempotent)
+    # and the anonymous device is retired — it can no longer produce
+    # new data.
     device_id = "email-" + secrets.token_hex(12)
     try:
         device = database.get_or_create_device(device_id, age=body.age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    database.create_user(email, email_auth.hash_password(body.password), body.age, device_id)
+    migrated = dict(database.ZERO_MERGE)
+    if linked is not None and linked != device_id:
+        migrated = database.merge_device_data(linked, device_id, retire_source=True)
+    database.create_user(
+        email, email_auth.hash_password(body.password),
+        body.age if body.age is not None else device.get("age"), device_id,
+        display_name=display_name,
+    )
     database.award_point(device_id, "login")
     return {
         "token": issue_token(device_id),
         "device_id": device_id,
         "email": email,
         "email_verified": False,
+        "display_name": display_name,
         "plan": device["plan"],
         "minor_mode": bool(device["minor_mode"]),
         "age": device["age"],
+        "linked_anonymous_device": linked is not None,
+        "migrated": migrated,
     }
 
 
@@ -327,6 +441,17 @@ def auth_login_email(body: LoginEmailIn):
     if not user or not email_auth.verify_password(body.password, user["password_hash"]):
         raise ApiError(401, "invalid_credentials", "邮箱或密码错误")
     device_id = user["device_id"]
+    linked = _resolve_link_device(body.device_id, body.device_token)
+    migrated = dict(database.ZERO_MERGE)
+    if linked is not None and linked != device_id:
+        # One-time migration for accounts registered before the merge
+        # existed: fold the anonymous device's data into the email
+        # account (deduped, idempotent) and retire the anonymous
+        # device. A device already bound to another email is refused.
+        other = database.get_user_by_device(linked)
+        if other is not None and other["email"] != email:
+            raise ApiError(409, "device_already_bound", "该设备已绑定其他邮箱账号")
+        migrated = database.merge_device_data(linked, device_id, retire_source=True)
     database.award_point(device_id, "login")
     device = database.get_device(device_id)
     return {
@@ -334,8 +459,30 @@ def auth_login_email(body: LoginEmailIn):
         "device_id": device_id,
         "email": email,
         "email_verified": bool(user["email_verified"]),
+        "display_name": user.get("display_name"),
         "plan": device["plan"] if device else "free",
+        "migrated": migrated,
     }
+
+
+@app.get("/api/v1/auth/me")
+def auth_me(device_id: str = Depends(get_current_device)):
+    """Profile for the 我的 page: email account + virtual-world name.
+    Anonymous devices get email/display_name None."""
+    return _public_profile(device_id)
+
+
+@app.patch("/api/v1/auth/display-name")
+def auth_update_display_name(body: DisplayNameIn, device_id: str = Depends(get_current_device)):
+    """Rename the virtual-world name. Takes effect immediately — the
+    next reply generation reads it live from the users row. Email
+    accounts only: anonymous devices have no name to rename."""
+    user = database.get_user_by_device(device_id)
+    if not user:
+        raise ApiError(400, "account_email_not_bound", "该账号未绑定邮箱，请先注册邮箱账号")
+    name = _validate_display_name(body.display_name)
+    database.update_user_display_name(user["email"], name)
+    return _public_profile(device_id)
 
 
 @app.get("/api/v1/auth/captcha")
@@ -534,6 +681,14 @@ def get_character(character_id: str, device_id: str = Depends(get_current_device
 
 @app.post("/api/v1/letters", status_code=status.HTTP_201_CREATED)
 def send_letter(body: LetterIn, device_id: str = Depends(get_current_device)):
+    # Sending needs an email-registered account: anonymous browsing is
+    # read-only. Registered-but-unverified accounts CAN send (only
+    # password change / recovery require verification).
+    if not _is_registered(device_id):
+        raise ApiError(
+            403, "anonymous_letter_forbidden",
+            "发信需要注册邮箱账号，匿名浏览只能看看",
+        )
     ok, problems = validate_user_letter(body.text)
     if not ok:
         detail = "; ".join(problems)
@@ -642,10 +797,11 @@ def read_letter(letter_id: int, device_id: str = Depends(get_current_device)):
     # Unread = neither the new user_read_at nor the legacy read_at set.
     # First call records user_read_at and awards +1 (once per letter,
     # enforced by award_point's ref dedupe); repeats never overwrite.
+    # Anonymous browsing earns no points (see _is_registered).
     was_unread = not letter.get("user_read_at") and not letter.get("read_at")
     letter = database.mark_letter_read(device_id, letter_id)
     awarded = 0
-    if was_unread:
+    if was_unread and _is_registered(device_id):
         awarded = database.award_point(device_id, "read", ref_id=str(letter_id))
     _device, _tier = _device_plan(device_id)
     plan = _device["plan"] if _device else "free"

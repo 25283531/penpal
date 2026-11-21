@@ -25,6 +25,21 @@ def build_reply_context(device_id: str, character_id: str) -> str:
     )
     parts.append(f"【人生经历（定稿）】{char['life_history']}")
 
+    # How to address the user: registered users chose a virtual-world
+    # name — use it naturally, not every sentence. Anonymous users have
+    # no name: address them as "你" and never invent one.
+    user = database.get_user_by_device(device_id)
+    display_name = (user or {}).get("display_name") or ""
+    if display_name:
+        parts.append(
+            f"【对方在这个虚拟世界的名字】对方叫“{display_name}”。"
+            "写信时可以自然地用这个名字称呼对方，不用每句都喊，顺其自然就好。"
+        )
+    else:
+        parts.append(
+            "【称呼】对方还没有起虚拟世界姓名，写信时用“你”称呼，不要编造名字。"
+        )
+
     persona = database.get_persona(device_id, character_id)
     summary = persona["summary"] or (
         f"我是{char['name']}，我们才刚刚认识，我正在慢慢了解你。"

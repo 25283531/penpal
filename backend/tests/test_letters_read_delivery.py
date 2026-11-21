@@ -38,6 +38,26 @@ def _new_device(device_id: str, age: int = 30) -> str:
     return r.json()["token"]
 
 
+def _registered(email: str) -> tuple[str, str]:
+    """Register an email account (unverified) and return (token, device_id).
+
+    Sending letters needs a registered account — anonymous devices are
+    read-only (403 anonymous_letter_forbidden) — so every test that
+    sends a letter uses this helper instead of _new_device.
+    """
+    from app import email_auth
+
+    token, code, _png = email_auth.create_captcha()
+    r = client.post("/api/v1/auth/register", json={
+        "email": email, "password": "password123", "age": 30,
+        "display_name": "阿辉",
+        "captcha_token": token, "captcha_text": code,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["token"], body["device_id"]
+
+
 def _send(token: str, character_id: str, text: str = "你好，我是新来的笔友。"):
     return client.post(
         "/api/v1/letters",
@@ -174,7 +194,7 @@ def test_delivery_stage_thresholds():
 # ---------- expected reply + stage via the API ----------
 
 def test_expected_reply_first_same_day_then_free_plus_3():
-    tok = _new_device("exp-device-001")
+    tok, _device_id = _registered("exp@example.com")
     r = _send(tok, "P01", "第一封。")
     assert r.status_code == 201, r.text
     letter = r.json()
@@ -205,11 +225,11 @@ def test_expected_reply_first_same_day_then_free_plus_3():
     assert reply["user_read_at"] is None
 
     # second letter: free tier -> +3 days, stage still derived from real state
-    tok2 = _new_device("exp-device-002")
+    tok2, device_id2 = _registered("exp2@example.com")
     r = _send(tok2, "P01", "第一封。")
     assert r.status_code == 201
     _reply_via_process_due(tok2)
-    _shift_user_letter_created("exp-device-002", days_back=1)
+    _shift_user_letter_created(device_id2, days_back=1)
     r = _send(tok2, "P01", "第二封，想继续聊。")
     assert r.status_code == 201, r.text
     letter2 = r.json()
@@ -224,7 +244,7 @@ def test_expected_reply_first_same_day_then_free_plus_3():
 # ---------- read: idempotent, +1 once, unread-count moves ----------
 
 def test_read_idempotent_and_unread_count():
-    tok = _new_device("read-device-001")
+    tok, _device_id = _registered("read@example.com")
     r = client.get("/api/v1/letters/unread-count", headers=_auth(tok))
     assert r.status_code == 200 and r.json()["unread_count"] == 0
 
@@ -265,7 +285,7 @@ def test_read_idempotent_and_unread_count():
 
 
 def test_character_read_at_never_future_or_before_sent():
-    tok = _new_device("charread-device-001")
+    tok, _device_id = _registered("charread@example.com")
     r = _send(tok, "P01", "第一封。")
     assert r.status_code == 201
     _reply_via_process_due(tok)

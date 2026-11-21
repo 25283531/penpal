@@ -60,10 +60,12 @@ def _captcha():
     return token, code
 
 
-def _register(email: str, password: str = "password123", age: int = 30):
+def _register(email: str, password: str = "password123", age: int = 30,
+               display_name: str = "阿辉"):
     token, code = _captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": email, "password": password, "age": age,
+        "display_name": display_name,
         "captcha_token": token, "captcha_text": code,
     })
     assert r.status_code == 200, r.text
@@ -138,6 +140,7 @@ def test_register_login_happy_path():
     token, code = _captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": "happy@example.com", "password": "password123", "age": 30,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
     assert r.status_code == 400
@@ -154,12 +157,14 @@ def test_register_requires_captcha_age_gate_and_password_length():
     # no captcha -> 400
     r = client.post("/api/v1/auth/register", json={
         "email": "nocaptcha@example.com", "password": "password123", "age": 30,
+        "display_name": "阿辉",
     })
     assert r.status_code == 400, r.text
     # wrong captcha text -> 400
     token, _code = _captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": "badcaptcha@example.com", "password": "password123", "age": 30,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": "ZZZZ",
     })
     assert r.status_code == 400
@@ -167,6 +172,7 @@ def test_register_requires_captcha_age_gate_and_password_length():
     token, code = _captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": "shortpw@example.com", "password": "short", "age": 30,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
     assert r.status_code == 400
@@ -174,6 +180,7 @@ def test_register_requires_captcha_age_gate_and_password_length():
     token, code = _captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": "kid13@example.com", "password": "password123", "age": 13,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
     assert r.status_code == 400
@@ -181,6 +188,7 @@ def test_register_requires_captcha_age_gate_and_password_length():
     token, code = _captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": "not-an-email", "password": "password123", "age": 30,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
     assert r.status_code == 400
@@ -199,11 +207,13 @@ def test_captcha_endpoint_png_and_single_use():
     # use the endpoint token with a wrong code -> 400 and token consumed
     r = client.post("/api/v1/auth/register", json={
         "email": "reuse@example.com", "password": "password123", "age": 30,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": "ZZZZ",
     })
     assert r.status_code == 400
     r = client.post("/api/v1/auth/register", json={
         "email": "reuse@example.com", "password": "password123", "age": 30,
+        "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
     assert r.status_code == 400  # token already consumed

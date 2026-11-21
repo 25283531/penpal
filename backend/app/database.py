@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS users (
     verified_at TEXT,
     age INTEGER,
     device_id TEXT UNIQUE NOT NULL,
+    display_name TEXT,
     created_at TEXT NOT NULL
 );
 -- M1: email verification / reset codes (SHA256 of the code only, never the code)
@@ -205,6 +206,20 @@ CREATE TABLE IF NOT EXISTS captchas (
     token TEXT PRIMARY KEY,
     code_hash TEXT NOT NULL,
     expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+-- Anonymous -> email account merges (one row per merge; the move itself
+-- is the idempotency guarantee — moved rows no longer live under the
+-- source device, so a repeated merge finds nothing left to move).
+CREATE TABLE IF NOT EXISTS device_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_device_id TEXT NOT NULL,
+    target_device_id TEXT NOT NULL,
+    letters_moved INTEGER NOT NULL DEFAULT 0,
+    points_moved INTEGER NOT NULL DEFAULT 0,
+    points_dropped_duplicate INTEGER NOT NULL DEFAULT 0,
+    relationships_moved INTEGER NOT NULL DEFAULT 0,
+    memories_moved INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 -- M1: send-code events (rate limits) and failures (captcha gating)
@@ -295,6 +310,9 @@ def _migrate_columns() -> None:
             ("motto", "TEXT"),
             ("photos", "TEXT"),
             ("candid_photos", "TEXT"),
+        ],
+        "users": [
+            ("display_name", "TEXT"),
         ],
     }
     with connect() as conn:
@@ -1499,12 +1517,13 @@ def dashboard_stats() -> dict:
 
 # ---- M1: email users / verification codes / captchas / rate limits ----
 
-def create_user(email: str, password_hash: str, age: int | None, device_id: str) -> dict:
+def create_user(email: str, password_hash: str, age: int | None, device_id: str,
+                display_name: str | None = None) -> dict:
     with connect() as conn:
         conn.execute(
             "INSERT INTO users (email, password_hash, email_verified, verified_at,"
-            " age, device_id, created_at) VALUES (?, ?, 0, NULL, ?, ?, ?)",
-            (email, password_hash, age, device_id, _now_iso()),
+            " age, device_id, display_name, created_at) VALUES (?, ?, 0, NULL, ?, ?, ?, ?)",
+            (email, password_hash, age, device_id, display_name, _now_iso()),
         )
     return get_user_by_email(email)
 
@@ -1513,7 +1532,7 @@ def get_user_by_email(email: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT email, password_hash, email_verified, verified_at, age,"
-            " device_id, created_at FROM users WHERE email = ?",
+            " device_id, display_name, created_at FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     return dict(row) if row else None
@@ -1523,10 +1542,21 @@ def get_user_by_device(device_id: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT email, password_hash, email_verified, verified_at, age,"
-            " device_id, created_at FROM users WHERE device_id = ?",
+            " device_id, display_name, created_at FROM users WHERE device_id = ?",
             (device_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def update_user_display_name(email: str, display_name: str) -> dict | None:
+    """Rename the user's virtual-world name. Takes effect immediately:
+    the next reply generation reads it live from the users row."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE users SET display_name = ? WHERE email = ?",
+            (display_name, email),
+        )
+    return get_user_by_email(email)
 
 
 def set_user_verified(email: str) -> dict | None:
@@ -1545,6 +1575,237 @@ def update_user_password(email: str, password_hash: str) -> dict | None:
             (password_hash, email),
         )
     return get_user_by_email(email)
+
+
+ZERO_MERGE = {
+    "merged": False,
+    "letters_moved": 0,
+    "points_moved": 0,
+    "points_dropped_duplicate": 0,
+    "relationships_moved": 0,
+    "memories_moved": 0,
+}
+
+
+def merge_device_data(source_device_id: str, target_device_id: str,
+                      retire_source: bool = False) -> dict:
+    """Move ALL of one device's data under another device (anonymous ->
+    email-account merge). Used when an email registration or login binds
+    the currently-anonymous device: letters, point events, relationships,
+    memories, persona, consolidation runs, unlocks and referrals all move
+    to the target device.
+
+    With retire_source=True (the registered-account flow) the source
+    device row itself is deleted last, so its old anonymous token stops
+    working (401 unknown_device) and the anonymous identity can no
+    longer produce new data — the email account is the only identity
+    from then on. A later anonymous re-auth under the same client id
+    would create a fresh, empty device row; it never resurrects the
+    moved data.
+
+    No double-counting: a point event is dropped instead of moved when
+    the target already has the same event — same (kind, ref_id) for
+    write/read, same (kind, date) for login (the same dedupe rule
+    award_point enforces). Idempotent: moved rows no longer live under
+    the source, so a repeated merge moves nothing; every run is recorded
+    in device_merges for audit. One transaction: all-or-nothing.
+    """
+    if not source_device_id or source_device_id == target_device_id:
+        return dict(ZERO_MERGE)
+    now = _now_iso()
+    counts = dict(ZERO_MERGE)
+    counts["merged"] = True
+    with connect() as conn:
+        # Letters: ids are globally unique, so a plain reassign is safe.
+        cur = conn.execute(
+            "UPDATE letters SET device_id = ? WHERE device_id = ?",
+            (target_device_id, source_device_id),
+        )
+        counts["letters_moved"] = cur.rowcount
+
+        # Point events: move, unless the target already has that event.
+        src_points = conn.execute(
+            "SELECT id, kind, ref_id, date FROM point_events WHERE device_id = ? ORDER BY id",
+            (source_device_id,),
+        ).fetchall()
+        for p in src_points:
+            if p["kind"] == "login":
+                dup = conn.execute(
+                    "SELECT 1 FROM point_events WHERE device_id = ? AND kind = 'login' AND date = ?",
+                    (target_device_id, p["date"]),
+                ).fetchone()
+            elif p["ref_id"] is not None:
+                dup = conn.execute(
+                    "SELECT 1 FROM point_events WHERE device_id = ? AND kind = ? AND ref_id = ?",
+                    (target_device_id, p["kind"], p["ref_id"]),
+                ).fetchone()
+            else:
+                dup = conn.execute(
+                    "SELECT 1 FROM point_events WHERE device_id = ? AND kind = ? AND date = ?",
+                    (target_device_id, p["kind"], p["date"]),
+                ).fetchone()
+            if dup:
+                conn.execute("DELETE FROM point_events WHERE id = ?", (p["id"],))
+                counts["points_dropped_duplicate"] += 1
+            else:
+                conn.execute(
+                    "UPDATE point_events SET device_id = ? WHERE id = ?",
+                    (target_device_id, p["id"]),
+                )
+                counts["points_moved"] += 1
+
+        # Relationships: one row per (device, character). No conflict ->
+        # move. Conflict -> the target row wins, except a live source
+        # relationship revives an ended target one.
+        src_rels = conn.execute(
+            "SELECT character_id, status FROM relationships WHERE device_id = ?",
+            (source_device_id,),
+        ).fetchall()
+        for r in src_rels:
+            tgt = conn.execute(
+                "SELECT status FROM relationships WHERE device_id = ? AND character_id = ?",
+                (target_device_id, r["character_id"]),
+            ).fetchone()
+            if tgt is None:
+                conn.execute(
+                    "UPDATE relationships SET device_id = ?"
+                    " WHERE device_id = ? AND character_id = ?",
+                    (target_device_id, source_device_id, r["character_id"]),
+                )
+                counts["relationships_moved"] += 1
+            else:
+                if r["status"] == "active" and tgt["status"] == "ended":
+                    conn.execute(
+                        "UPDATE relationships SET status = 'active', ended_at = NULL,"
+                        " reconnect_until = NULL, updated_at = ?"
+                        " WHERE device_id = ? AND character_id = ?",
+                        (now, target_device_id, r["character_id"]),
+                    )
+                    counts["relationships_moved"] += 1
+                conn.execute(
+                    "DELETE FROM relationships WHERE device_id = ? AND character_id = ?",
+                    (source_device_id, r["character_id"]),
+                )
+
+        # Memories: no per-device unique key, plain reassign.
+        cur = conn.execute(
+            "UPDATE memories SET device_id = ? WHERE device_id = ?",
+            (target_device_id, source_device_id),
+        )
+        counts["memories_moved"] = cur.rowcount
+
+        # Persona: one row per (device, character). A target row that is
+        # still a never-touched default (0 interactions, empty summary)
+        # is replaced by the source's lived-in row; otherwise the target
+        # row wins and the source row is dropped.
+        src_personas = conn.execute(
+            "SELECT character_id, relationship_stage, summary, traits,"
+            " interaction_count FROM persona WHERE device_id = ?",
+            (source_device_id,),
+        ).fetchall()
+        for p in src_personas:
+            tgt = conn.execute(
+                "SELECT interaction_count, summary FROM persona"
+                " WHERE device_id = ? AND character_id = ?",
+                (target_device_id, p["character_id"]),
+            ).fetchone()
+            if tgt is None:
+                conn.execute(
+                    "UPDATE persona SET device_id = ? WHERE device_id = ? AND character_id = ?",
+                    (target_device_id, source_device_id, p["character_id"]),
+                )
+            elif (
+                tgt["interaction_count"] == 0
+                and decrypt_or_keep(tgt["summary"] or "") == ""
+            ):
+                conn.execute(
+                    "DELETE FROM persona WHERE device_id = ? AND character_id = ?",
+                    (target_device_id, p["character_id"]),
+                )
+                conn.execute(
+                    "UPDATE persona SET device_id = ? WHERE device_id = ? AND character_id = ?",
+                    (target_device_id, source_device_id, p["character_id"]),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM persona WHERE device_id = ? AND character_id = ?",
+                    (source_device_id, p["character_id"]),
+                )
+
+        # Consolidation runs: one row per (device, character); keep the
+        # target's when both exist (the later run is the fresher one).
+        src_runs = conn.execute(
+            "SELECT character_id FROM consolidation_runs WHERE device_id = ?",
+            (source_device_id,),
+        ).fetchall()
+        for r in src_runs:
+            tgt = conn.execute(
+                "SELECT 1 FROM consolidation_runs WHERE device_id = ? AND character_id = ?",
+                (target_device_id, r["character_id"]),
+            ).fetchone()
+            if tgt is None:
+                conn.execute(
+                    "UPDATE consolidation_runs SET device_id = ?"
+                    " WHERE device_id = ? AND character_id = ?",
+                    (target_device_id, source_device_id, r["character_id"]),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM consolidation_runs WHERE device_id = ? AND character_id = ?",
+                    (source_device_id, r["character_id"]),
+                )
+
+        # Unlocks: INSERT OR IGNORE moves each grant once.
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO unlocks (device_id, character_id, source, created_at)"
+            " SELECT ?, character_id, source, created_at FROM unlocks WHERE device_id = ?",
+            (target_device_id, source_device_id),
+        )
+        conn.execute("DELETE FROM unlocks WHERE device_id = ?", (source_device_id,))
+
+        # Referrals: the source's invites now come from the target; a
+        # referred device already recorded under the target keeps its row.
+        conn.execute(
+            "UPDATE referrals SET inviter_device_id = ? WHERE inviter_device_id = ?",
+            (target_device_id, source_device_id),
+        )
+        src_refd = conn.execute(
+            "SELECT id FROM referrals WHERE referred_device_id = ?",
+            (source_device_id,),
+        ).fetchall()
+        for r in src_refd:
+            tgt = conn.execute(
+                "SELECT 1 FROM referrals WHERE referred_device_id = ?",
+                (target_device_id,),
+            ).fetchone()
+            if tgt is None:
+                conn.execute(
+                    "UPDATE referrals SET referred_device_id = ? WHERE id = ?",
+                    (target_device_id, r["id"]),
+                )
+            else:
+                conn.execute("DELETE FROM referrals WHERE id = ?", (r["id"],))
+
+        conn.execute(
+            "INSERT INTO device_merges (source_device_id, target_device_id,"
+            " letters_moved, points_moved, points_dropped_duplicate,"
+            " relationships_moved, memories_moved, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                source_device_id, target_device_id,
+                counts["letters_moved"], counts["points_moved"],
+                counts["points_dropped_duplicate"],
+                counts["relationships_moved"], counts["memories_moved"], now,
+            ),
+        )
+        if retire_source:
+            # Retire the anonymous identity: its token stops working and
+            # it can no longer produce new data. All of its data already
+            # lives under the target device (see above).
+            conn.execute(
+                "DELETE FROM devices WHERE device_id = ?", (source_device_id,)
+            )
+    return counts
 
 
 def create_verification_code(email: str, purpose: str, code_hash: str, expires_at: str) -> int:
