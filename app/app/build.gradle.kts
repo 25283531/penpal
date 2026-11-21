@@ -77,4 +77,7 @@ dependencies {
 
     // Image loading (character photos served by the backend, Coil + OkHttp)
     implementation(libs.coil.compose)
+
+    // Local unit tests (ErrorMessagesTest: backend error -> localised key)
+    testImplementation(libs.junit)
 }

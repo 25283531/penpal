@@ -17,40 +17,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.junze.penpal.R
-import org.json.JSONObject
-import retrofit2.HttpException
-import java.io.IOException
+
+// Error text lives in ErrorMessages.kt: Throwables are mapped to a
+// localised [Notice] with Throwable.userNotice(). Backend `detail`
+// strings are never shown to the user (see that file).
 
 /**
- * Turns a failure into a message the user can act on.
- * - No connection / server not reachable yet -> "服务器未连接，请稍后再试"
- * - HTTP error with a backend {"detail": "..."} -> that detail
- *   (409 = outstanding letter, 429 = daily send limit reached)
- * - Anything else -> the exception message, or a generic fallback.
+ * Virtual-world name rule, identical to the backend's
+ * _DISPLAY_NAME_RE (backend/app/main.py): 1-20 chars, Chinese /
+ * letters / digits only. This is NOT a real name and is never
+ * identity-checked — it is only how pen pals address the user.
  */
-fun Throwable.userMessage(): String {
-    if (this is IOException) {
-        return "服务器未连接，请稍后再试"
-    }
-    if (this is HttpException) {
-        try {
-            val body = response()?.errorBody()?.string()
-            if (!body.isNullOrBlank()) {
-                val detail = JSONObject(body).optString("detail", "")
-                if (detail.isNotBlank()) return detail
-            }
-        } catch (_: Exception) {
-            // fall through to the generic message
-        }
-        return when (code()) {
-            429 -> "操作太频繁，请稍后再试"
-            401 -> "登录已过期，请重新登录"
-            404 -> "没有找到相关内容"
-            else -> "请求失败（${code()}），请稍后再试"
-        }
-    }
-    return message ?: "网络异常，请检查网络后重试"
-}
+private val DISPLAY_NAME_REGEX = Regex("^[\\u4e00-\\u9fffA-Za-z0-9]{1,20}$")
+
+fun isValidDisplayName(name: String): Boolean = DISPLAY_NAME_REGEX.matches(name)
 
 @Composable
 fun LoadingBox(modifier: Modifier = Modifier) {

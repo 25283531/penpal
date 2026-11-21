@@ -5,6 +5,7 @@ import com.junze.penpal.data.api.ApiClient
 import com.junze.penpal.data.local.AppDatabase
 import com.junze.penpal.data.prefs.SettingsStore
 import com.junze.penpal.data.repository.PenpalRepository
+import com.junze.penpal.ui.components.LocaleHelper
 import com.junze.penpal.worker.ReminderWorker
 
 /**
@@ -26,6 +27,10 @@ class PenpalApp : Application() {
     override fun onCreate() {
         super.onCreate()
         settings = SettingsStore(this)
+        // Apply the stored language before anything reads Locale.getDefault()
+        // (TimeFormat, displayGender). Activity resources are wrapped
+        // separately in MainActivity.attachBaseContext.
+        LocaleHelper.apply(LocaleHelper.readStoredLanguage(this))
         apiClient = ApiClient()
         repository = PenpalRepository(
             apiClient = apiClient,

@@ -1,6 +1,7 @@
 package com.junze.penpal
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -50,24 +51,55 @@ import com.junze.penpal.ui.letters.LetterDetailScreen
 import com.junze.penpal.ui.letters.LetterDetailViewModel
 import com.junze.penpal.ui.letters.WriteLetterScreen
 import com.junze.penpal.ui.letters.WriteLetterViewModel
+import com.junze.penpal.ui.components.LocaleHelper
 import com.junze.penpal.ui.me.MeScreen
 import com.junze.penpal.ui.me.MeViewModel
 import com.junze.penpal.ui.privacy.PrivacyScreen
 import com.junze.penpal.ui.privacy.PrivacyViewModel
 import com.junze.penpal.ui.nav.Routes
 import com.junze.penpal.ui.theme.PenpalTheme
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best effort */ }
 
+    /**
+     * Resources for this Activity resolve in the stored app language
+     * (Chinese default). The language is read synchronously here because
+     * no coroutine scope exists yet in attachBaseContext.
+     */
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(
+            LocaleHelper.wrap(newBase, LocaleHelper.readStoredLanguage(newBase))
+        )
+    }
+
+    /**
+     * Language switch from the "我" page: persist, apply to
+     * Locale.getDefault(), then recreate this Activity (not the app) so
+     * the new resources load immediately. The recreated Activity reads
+     * the saved language back in attachBaseContext.
+     */
+    fun setAppLanguage(code: String) {
+        lifecycleScope.launch {
+            (application as PenpalApp).settings.saveLanguage(code)
+            LocaleHelper.apply(code)
+            recreate()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestNotificationPermissionIfNeeded()
         setContent {
             PenpalTheme {
-                MainScaffold(app = application as PenpalApp)
+                MainScaffold(
+                    app = application as PenpalApp,
+                    onLanguageChange = { code -> setAppLanguage(code) }
+                )
             }
         }
     }
@@ -104,7 +136,7 @@ inline fun <reified T : ViewModel> vmFactory(crossinline create: () -> T) =
     }
 
 @Composable
-private fun MainScaffold(app: PenpalApp) {
+private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
@@ -116,7 +148,26 @@ private fun MainScaffold(app: PenpalApp) {
         factory = vmFactory { UnreadViewModel(app, app.repository) }
     )
     val unreadCount by unreadViewModel.unreadCount.collectAsState()
-    LaunchedEffect(navBackStackEntry) { unreadViewModel.refresh() }
+
+    // Home's ViewModel lives at the scaffold level (not inside the HOME
+    // route) so returning to HOME can trigger a timeline refresh — e.g.
+    // after a failed send, the outstanding letter the server already
+    // holds must appear as soon as the user comes back.
+    val homeViewModel: HomeViewModel = viewModel(
+        factory = vmFactory { HomeViewModel(app.repository, app.settings) }
+    )
+
+    // Whether an email account is registered: gates all write entries
+    // (anonymous browsing is read-only). Null = not loaded yet.
+    val registeredEmail by app.settings.accountEmail.collectAsState(initial = null)
+    val isRegistered = registeredEmail != null
+
+    LaunchedEffect(navBackStackEntry) {
+        unreadViewModel.refresh()
+        if (navBackStackEntry?.destination?.route == Routes.HOME) {
+            homeViewModel.refresh()
+        }
+    }
 
     val goTab: (String) -> Unit = { route ->
         navController.navigate(route) {
@@ -159,16 +210,14 @@ private fun MainScaffold(app: PenpalApp) {
             modifier = Modifier.padding(innerPadding)
         ) {
             composable(Routes.HOME) {
-                val vm: HomeViewModel = viewModel(
-                    factory = vmFactory { HomeViewModel(app.repository, app.settings) }
-                )
                 HomeScreen(
-                    viewModel = vm,
+                    viewModel = homeViewModel,
                     onLetterClick = { id ->
                         navController.navigate(Routes.letterDetail(id))
                     },
                     onVerifyClick = { navController.navigate(Routes.ACCOUNT) },
-                    onRefreshUnread = { unreadViewModel.refresh() }
+                    onRefreshUnread = { unreadViewModel.refresh() },
+                    onLoginClick = { navController.navigate(Routes.ACCOUNT) }
                 )
             }
             composable(Routes.CHARACTERS) {
@@ -198,7 +247,9 @@ private fun MainScaffold(app: PenpalApp) {
                     onLetterClick = { id ->
                         navController.navigate(Routes.letterDetail(id))
                     },
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    isRegistered = isRegistered,
+                    onRegisterClick = { navController.navigate(Routes.ACCOUNT) }
                 )
             }
             composable(
@@ -208,13 +259,15 @@ private fun MainScaffold(app: PenpalApp) {
                 val characterId = backStackEntry.arguments?.getString("characterId")
                     ?: return@composable
                 val vm: WriteLetterViewModel = viewModel(
-                    factory = vmFactory { WriteLetterViewModel(app.repository) }
+                    factory = vmFactory { WriteLetterViewModel(app.repository, app.settings) }
                 )
                 WriteLetterScreen(
                     characterId = characterId,
                     viewModel = vm,
                     onSent = { navController.popBackStack() },
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    isRegistered = isRegistered,
+                    onRegisterClick = { navController.navigate(Routes.ACCOUNT) }
                 )
             }
             composable(
@@ -240,7 +293,8 @@ private fun MainScaffold(app: PenpalApp) {
                 MeScreen(
                     viewModel = vm,
                     onAccountClick = { navController.navigate(Routes.ACCOUNT) },
-                    onPrivacyClick = { navController.navigate(Routes.PRIVACY) }
+                    onPrivacyClick = { navController.navigate(Routes.PRIVACY) },
+                    onLanguageChange = onLanguageChange
                 )
             }
             composable(Routes.ACCOUNT) {

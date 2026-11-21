@@ -10,6 +10,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.junze.penpal.MainActivity
 import com.junze.penpal.R
+import com.junze.penpal.ui.components.LocaleHelper
 
 /**
  * Launcher-badge best effort for the unread-reply count.
@@ -47,12 +48,16 @@ object UnreadBadge {
     const val NOTIFICATION_ID = 1002
 
     fun update(context: Context, unread: Int) {
+        // Wrap in the stored app language: the caller passes the
+        // application context, whose resources would otherwise stay in
+        // the default (Chinese) locale.
+        val localized = LocaleHelper.wrap(context, LocaleHelper.readStoredLanguage(context))
         val manager = NotificationManagerCompat.from(context)
         if (unread <= 0) {
             manager.cancel(NOTIFICATION_ID)
             return
         }
-        createChannel(context)
+        createChannel(localized)
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
@@ -62,8 +67,8 @@ object UnreadBadge {
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(context.getString(R.string.unread_notification_title, unread))
-            .setContentText(context.getString(R.string.unread_notification_text))
+            .setContentTitle(localized.getString(R.string.unread_notification_title, unread))
+            .setContentText(localized.getString(R.string.unread_notification_text))
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setNumber(unread)

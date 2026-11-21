@@ -44,9 +44,12 @@ import com.junze.penpal.data.api.LetterDto
 import com.junze.penpal.data.prefs.SettingsStore
 import com.junze.penpal.data.repository.PenpalRepository
 import com.junze.penpal.ui.components.EmptyBox
+import com.junze.penpal.ui.components.Notice
+import com.junze.penpal.ui.components.SessionExpiredException
 import com.junze.penpal.ui.components.expectedReplyText
 import com.junze.penpal.ui.components.formatDateTimeShanghai
-import com.junze.penpal.ui.components.userMessage
+import com.junze.penpal.ui.components.userNotice
+import retrofit2.HttpException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -77,27 +80,50 @@ class HomeViewModel(
     private val _points = MutableStateFlow<Int?>(null)
     val points: StateFlow<Int?> = _points
 
-    private val _notice = MutableStateFlow<String?>(null)
-    val notice: StateFlow<String?> = _notice
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice
 
-    init {
-        refresh()
-    }
+    /**
+     * Last letters-refresh failure, kept (not just a transient snackbar).
+     * While set AND the timeline is empty, the screen shows an explicit
+     * error card with retry — it must never silently show "还没有信"
+     * when the server could not be reached or the session expired.
+     * Cleared on the next refresh attempt / success.
+     */
+    private val _lettersError = MutableStateFlow<Notice?>(null)
+    val lettersError: StateFlow<Notice?> = _lettersError
 
+    /** True when the letters error is a dead session (sign in again). */
+    private val _lettersErrorSessionExpired = MutableStateFlow(false)
+    val lettersErrorSessionExpired: StateFlow<Boolean> = _lettersErrorSessionExpired
+
+    // No init refresh: MainScaffold refreshes whenever the user navigates
+    // back to HOME (so a letter discovered by a failed send — e.g. the
+    // 409 unanswered-letter case — appears as soon as they return).
     fun refresh() {
         viewModelScope.launch {
             _isRefreshing.value = true
+            _lettersError.value = null
+            _lettersErrorSessionExpired.value = false
             // Device auth happens inside withAuth; the daily-login point is
             // best effort and never blocks the letter flow.
             repository.dailyLogin()
                 .onSuccess { _points.value = it.points }
                 .onFailure { repository.getPoints().onSuccess { _points.value = it.points } }
             repository.refreshCharacters().onFailure {
-                _notice.value = it.userMessage()
+                _notice.value = it.userNotice()
             }
-            repository.refreshLetters().onFailure {
-                if (_notice.value == null) _notice.value = it.userMessage()
-            }
+            repository.refreshLetters()
+                .onSuccess {
+                    _lettersError.value = null
+                    _lettersErrorSessionExpired.value = false
+                }
+                .onFailure {
+                    _lettersError.value = it.userNotice()
+                    _lettersErrorSessionExpired.value = it is SessionExpiredException ||
+                        (it is HttpException && it.code() == 401)
+                    if (_notice.value == null) _notice.value = it.userNotice()
+                }
             _isRefreshing.value = false
         }
     }
@@ -107,24 +133,17 @@ class HomeViewModel(
     }
 }
 
-/**
- * Kept for callers in LettersScreen: prefers the backend's
- * expected_reply_at (ISO 8601), falls back to reply_due_at.
- * "预计今天回信" / "预计 M月d日 回信" (Asia/Shanghai).
- */
-fun replyDueText(replyDueAt: String?): String =
-    expectedReplyText(expectedReplyAt = null, replyDueAt = replyDueAt)
-
 /** Read-time line for one timeline row (Asia/Shanghai, never invented). */
+@Composable
 fun letterReadLine(letter: LetterDto): String {
     return if (letter.direction == "ai") {
         val readAt = letter.userReadAt ?: letter.readAt
-        if (readAt.isNullOrBlank()) "我读信：未读"
-        else "我读信：${formatDateTimeShanghai(readAt)}"
+        if (readAt.isNullOrBlank()) stringResource(R.string.letter_read_mine_unread)
+        else stringResource(R.string.letter_read_mine, formatDateTimeShanghai(readAt))
     } else {
         val readAt = letter.characterReadAt
-        if (readAt.isNullOrBlank()) "对方读信：尚未读信"
-        else "对方读信：${formatDateTimeShanghai(readAt)}"
+        if (readAt.isNullOrBlank()) stringResource(R.string.letter_read_theirs_notyet)
+        else stringResource(R.string.letter_read_theirs, formatDateTimeShanghai(readAt))
     }
 }
 
@@ -134,7 +153,8 @@ fun HomeScreen(
     viewModel: HomeViewModel,
     onLetterClick: (Int) -> Unit,
     onVerifyClick: () -> Unit,
-    onRefreshUnread: () -> Unit = {}
+    onRefreshUnread: () -> Unit = {},
+    onLoginClick: () -> Unit = {}
 ) {
     val characters by viewModel.characters.collectAsState()
     val letters by viewModel.letters.collectAsState()
@@ -143,10 +163,13 @@ fun HomeScreen(
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val points by viewModel.points.collectAsState()
     val notice by viewModel.notice.collectAsState()
+    val lettersError by viewModel.lettersError.collectAsState()
+    val lettersErrorSessionExpired by viewModel.lettersErrorSessionExpired.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(notice) {
-        notice?.let {
+    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
+    LaunchedEffect(noticeText) {
+        noticeText?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearNotice()
         }
@@ -167,7 +190,10 @@ fun HomeScreen(
                         viewModel.refresh()
                         onRefreshUnread()
                     }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = stringResource(R.string.action_refresh_desc)
+                        )
                     }
                 }
             )
@@ -237,16 +263,56 @@ fun HomeScreen(
                     if (isRefreshing) CircularProgressIndicator()
                 }
             }
+            // Empty timeline: show the error card when the refresh failed
+            // (never a silent "还没有信"), the empty state only when the
+            // refresh actually succeeded and the inbox is genuinely empty.
             if (letters.isEmpty() && !isRefreshing) {
-                item {
-                    EmptyBox(
-                        message = stringResource(R.string.home_no_letters),
-                        modifier = Modifier.height(80.dp)
-                    )
+                val error = lettersError
+                if (error != null) {
+                    item {
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            )
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = stringResource(error.resId, *error.args.toTypedArray()),
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    androidx.compose.material3.Button(
+                                        onClick = {
+                                            viewModel.refresh()
+                                            onRefreshUnread()
+                                        }
+                                    ) {
+                                        Text(text = stringResource(R.string.action_retry))
+                                    }
+                                    if (lettersErrorSessionExpired) {
+                                        androidx.compose.material3.OutlinedButton(
+                                            onClick = onLoginClick
+                                        ) {
+                                            Text(text = stringResource(R.string.account_login_register))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    item {
+                        EmptyBox(
+                            message = stringResource(R.string.home_no_letters),
+                            modifier = Modifier.height(80.dp)
+                        )
+                    }
                 }
             }
             items(letters, key = { it.id }) { letter ->
-                val recipient = characterNames[letter.characterId] ?: "笔友"
+                val recipient = characterNames[letter.characterId]
+                    ?: stringResource(R.string.home_friend_fallback)
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -258,9 +324,9 @@ fun HomeScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
                             text = if (letter.direction == "ai") {
-                                "收到 $recipient 的回信"
+                                stringResource(R.string.home_letter_received, recipient)
                             } else {
-                                "写给 $recipient"
+                                stringResource(R.string.home_letter_sent, recipient)
                             },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary
@@ -284,8 +350,10 @@ fun HomeScreen(
                         }
                         Text(
                             text = listOfNotNull(
-                                "发信时间：${formatDateTimeShanghai(letter.createdAt)}"
-                                    .takeIf { !letter.createdAt.isNullOrBlank() },
+                                stringResource(
+                                    R.string.home_sent_time,
+                                    formatDateTimeShanghai(letter.createdAt)
+                                ).takeIf { !letter.createdAt.isNullOrBlank() },
                                 letterReadLine(letter),
                                 expectedReplyText(
                                     letter.expectedReplyAt,

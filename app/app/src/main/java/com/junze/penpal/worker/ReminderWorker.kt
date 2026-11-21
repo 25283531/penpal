@@ -16,6 +16,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.junze.penpal.MainActivity
 import com.junze.penpal.R
+import com.junze.penpal.ui.components.LocaleHelper
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -31,12 +32,19 @@ class ReminderWorker(
 
     override suspend fun doWork(): Result {
         val slot = inputData.getString(KEY_SLOT) ?: SLOT_MORNING
+        // Notifications use the application context, whose resources do
+        // not follow the Activity locale — wrap it in the stored app
+        // language so reminders arrive in the language the user chose.
+        val context = LocaleHelper.wrap(
+            applicationContext,
+            LocaleHelper.readStoredLanguage(applicationContext)
+        )
         val (title, text) = if (slot == SLOT_EVENING) {
-            applicationContext.getString(R.string.reminder_evening_title) to
-                applicationContext.getString(R.string.reminder_evening_text)
+            context.getString(R.string.reminder_evening_title) to
+                context.getString(R.string.reminder_evening_text)
         } else {
-            applicationContext.getString(R.string.reminder_morning_title) to
-                applicationContext.getString(R.string.reminder_morning_text)
+            context.getString(R.string.reminder_morning_title) to
+                context.getString(R.string.reminder_morning_text)
         }
         showNotification(title, text)
         return Result.success()
@@ -44,7 +52,9 @@ class ReminderWorker(
 
     private fun showNotification(title: String, text: String) {
         val context = applicationContext
-        createChannel(context)
+        createChannel(
+            LocaleHelper.wrap(context, LocaleHelper.readStoredLanguage(context))
+        )
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }

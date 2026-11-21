@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -57,12 +58,15 @@ fun PrivacyScreen(
 ) {
     val remoteText by viewModel.text.collectAsState()
     val context = LocalContext.current
+    // The bundled fallback is Chinese-only (same text as the server);
+    // translating the legal policy text is out of scope for this change.
+    val fallbackText = stringResource(R.string.privacy_load_failed)
     val bundledText = remember {
         try {
             context.resources.openRawResource(R.raw.privacy_policy)
                 .bufferedReader().readText()
         } catch (_: Exception) {
-            "隐私协议加载失败，请检查网络后重试。"
+            fallbackText
         }
     }
     val text = remoteText ?: bundledText
@@ -70,9 +74,9 @@ fun PrivacyScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(text = "隐私协议") },
+                title = { Text(text = stringResource(R.string.privacy_policy)) },
                 navigationIcon = {
-                    TextButton(onClick = onBack) { Text(text = "返回") }
+                    TextButton(onClick = onBack) { Text(text = stringResource(R.string.action_back)) }
                 }
             )
         }

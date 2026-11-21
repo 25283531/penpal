@@ -5,6 +5,7 @@ import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Header
+import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -28,6 +29,8 @@ import retrofit2.http.Query
  *   email login is POST /auth/login-email.
  * - M0 has no GET /api/v1/auth/me; the app keeps the verification state
  *   from the register / login-email response and persists it locally.
+ *   (2026-11-21: the backend added GET /auth/me + PATCH
+ *   /auth/display-name; see ProfileDto below.)
  * - Letter ids are ints in the backend (not strings).
  */
 
@@ -67,12 +70,25 @@ data class RegisterRequest(
     val password: String,
     val age: Int,
     val captchaToken: String,
-    val captchaText: String
+    val captchaText: String,
+    /** Virtual-world name (required): 1-20 chars, Chinese / letters / digits. */
+    val displayName: String,
+    /** Anonymous device whose data migrates into the new email account
+     * (letters / points / relationships / unlocks); null = no link. */
+    val deviceId: String? = null,
+    /** Anonymous bearer token for the same device (proves ownership);
+     * wins over deviceId when both are given. */
+    val deviceToken: String? = null
 )
 
 data class LoginEmailRequest(
     val email: String,
-    val password: String
+    val password: String,
+    /** Anonymous device to merge into this email account on login
+     * (one-time migration for accounts registered before the merge
+     * existed); null = no merge. */
+    val deviceId: String? = null,
+    val deviceToken: String? = null
 )
 
 data class AccountDto(
@@ -93,9 +109,37 @@ data class AuthResponse(
     val deviceId: String? = null,
     val email: String? = null,
     val emailVerified: Boolean? = null,
+    /** Virtual-world name (register / login-email echo it back). */
+    val displayName: String? = null,
+    /** True when an anonymous device was linked + migrated. */
+    val linkedAnonymousDevice: Boolean? = null,
+    /** What the one-time anonymous -> email migration moved, if any. */
+    val migrated: MigratedDto? = null,
     val user: AccountDto? = null,
     val emailSent: Boolean? = null
 )
+
+/** Counts from the backend's one-time anonymous -> email merge. */
+data class MigratedDto(
+    val merged: Boolean? = null,
+    val lettersMoved: Int? = null,
+    val pointsMoved: Int? = null,
+    val pointsDroppedDuplicate: Int? = null,
+    val relationshipsMoved: Int? = null,
+    val memoriesMoved: Int? = null
+)
+
+/** GET /api/v1/auth/me: email account + virtual-world name. Anonymous
+ * devices get email / displayName null. */
+data class ProfileDto(
+    val deviceId: String? = null,
+    val email: String? = null,
+    val displayName: String? = null,
+    val emailVerified: Boolean? = null,
+    val plan: String? = null
+)
+
+data class UpdateDisplayNameRequest(val displayName: String)
 
 data class SendCodeRequest(
     val email: String,
@@ -332,6 +376,18 @@ interface ApiService {
 
     @POST("auth/login-email")
     suspend fun loginEmail(@Body request: LoginEmailRequest): AuthResponse
+
+    /** Profile for the 我的 page: email account + virtual-world name. */
+    @GET("auth/me")
+    suspend fun getProfile(@Header("Authorization") token: String): ProfileDto
+
+    /** Rename the virtual-world name (email accounts only; takes effect
+     * immediately — the next reply generation reads it live). */
+    @PATCH("auth/display-name")
+    suspend fun updateDisplayName(
+        @Header("Authorization") token: String,
+        @Body request: UpdateDisplayNameRequest
+    ): ProfileDto
 
     @POST("auth/change-password")
     suspend fun changePassword(

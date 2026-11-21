@@ -29,6 +29,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -61,16 +62,20 @@ import com.junze.penpal.data.api.ApiClient
 import com.junze.penpal.data.api.CharacterDto
 import com.junze.penpal.data.api.CharacterPhotoDto
 import com.junze.penpal.data.api.LetterDto
+import com.junze.penpal.data.prefs.SettingsStore
 import com.junze.penpal.data.repository.MAX_LETTER_CHARS
 import com.junze.penpal.data.repository.PenpalRepository
 import com.junze.penpal.ui.components.EmptyBox
+import com.junze.penpal.ui.components.Notice
 import com.junze.penpal.ui.components.expectedReplyText
 import com.junze.penpal.ui.components.formatDateTimeShanghai
-import com.junze.penpal.ui.components.userMessage
+import com.junze.penpal.ui.components.userNotice
 import com.junze.penpal.ui.home.letterReadLine
+import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -86,8 +91,8 @@ class CharactersViewModel(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
 
-    private val _notice = MutableStateFlow<String?>(null)
-    val notice: StateFlow<String?> = _notice
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice
 
     init {
         refresh()
@@ -97,7 +102,7 @@ class CharactersViewModel(
         viewModelScope.launch {
             _isLoading.value = true
             repository.refreshCharacters().onFailure {
-                _notice.value = it.userMessage()
+                _notice.value = it.userNotice()
             }
             _isLoading.value = false
         }
@@ -126,8 +131,9 @@ fun CharactersScreen(
     val notice by viewModel.notice.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(notice) {
-        notice?.let {
+    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
+    LaunchedEffect(noticeText) {
+        noticeText?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearNotice()
         }
@@ -150,7 +156,7 @@ fun CharactersScreen(
             item { Spacer(modifier = Modifier.height(4.dp)) }
             item {
                 Text(
-                    text = "每一位都是虚拟知己，不是真人；回信由 AI 生成。",
+                    text = stringResource(R.string.characters_intro),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -173,11 +179,12 @@ fun CharactersScreen(
 
 /**
  * Backend returns gender as "male"/"female" (the task brief said "男"/"女";
- * accept both). Displayed as 男 / 女, never as the English code.
+ * accept both). Displayed as 男 / 女 in Chinese, Male / Female in English,
+ * never as the English code. Unknown values pass through unchanged.
  */
 fun displayGender(gender: String?): String? = when (gender?.trim()?.lowercase()) {
-    "male", "男" -> "男"
-    "female", "女" -> "女"
+    "male", "男" -> if (Locale.getDefault().language == Locale.ENGLISH.language) "Male" else "男"
+    "female", "女" -> if (Locale.getDefault().language == Locale.ENGLISH.language) "Female" else "女"
     else -> gender?.takeIf { it.isNotBlank() }
 }
 
@@ -204,10 +211,12 @@ fun resolvePhotoUrl(url: String?): String? {
 fun CharacterDto.photoSlots(): List<CharacterPhotoDto> {
     val real = (photos ?: emptyList()).take(3)
     return real + List(3 - real.size) {
+        // Label is null: the UI falls back to stringResource(character_ai_label),
+        // so the placeholder text follows the app language.
         CharacterPhotoDto(
             photoUrl = null,
             isPlaceholder = true,
-            label = "AI 生成 · 虚拟人物"
+            label = null
         )
     }
 }
@@ -237,7 +246,7 @@ fun CharacterAvatar(character: CharacterDto, size: androidx.compose.ui.unit.Dp) 
                 .data(url)
                 .crossfade(true)
                 .build(),
-            contentDescription = "${character.name} 的照片",
+            contentDescription = stringResource(R.string.character_photo_desc, character.name),
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .size(size)
@@ -281,7 +290,7 @@ fun CharacterCard(character: CharacterDto, onClick: () -> Unit) {
                 Text(
                     text = listOfNotNull(
                         displayGender(character.gender),
-                        character.age?.let { "$it 岁" },
+                        character.age?.let { stringResource(R.string.character_age, it) },
                         character.occupation
                     ).joinToString(" · "),
                     style = MaterialTheme.typography.bodyMedium
@@ -289,7 +298,10 @@ fun CharacterCard(character: CharacterDto, onClick: () -> Unit) {
                 if (!character.hobbies.isNullOrEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "爱好：${character.hobbies!!.joinToString("、")}",
+                        text = stringResource(
+                            R.string.character_hobbies,
+                            character.hobbies!!.joinToString("、")
+                        ),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2
@@ -318,7 +330,11 @@ fun CharacterDetailScreen(
     viewModel: CharactersViewModel,
     onWriteClick: () -> Unit,
     onLetterClick: (Int) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    /** False = anonymous browsing: the write entry is visibly disabled
+     * with a prompt + a register action (writing needs an email account). */
+    isRegistered: Boolean = true,
+    onRegisterClick: () -> Unit = {}
 ) {
     var character by remember { mutableStateOf<CharacterDto?>(null) }
     val thread by viewModel.thread(characterId).collectAsState(initial = emptyList())
@@ -333,7 +349,10 @@ fun CharacterDetailScreen(
                 title = { Text(text = character?.name ?: stringResource(R.string.characters_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.action_back)
+                        )
                     }
                 }
             )
@@ -390,7 +409,7 @@ fun CharacterDetailScreen(
                                 Text(
                                     text = listOfNotNull(
                                         displayGender(current.gender),
-                                        current.age?.let { "$it 岁" },
+                                        current.age?.let { stringResource(R.string.character_age, it) },
                                         current.occupation,
                                         current.city
                                     ).joinToString(" · "),
@@ -408,7 +427,7 @@ fun CharacterDetailScreen(
                         current.motto?.takeIf { it.isNotBlank() }?.let { motto ->
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "交友宣言",
+                                text = stringResource(R.string.character_motto_title),
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Spacer(modifier = Modifier.height(4.dp))
@@ -428,7 +447,7 @@ fun CharacterDetailScreen(
                         if (!current.hobbies.isNullOrEmpty()) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "兴趣爱好",
+                                text = stringResource(R.string.character_hobbies_title),
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Spacer(modifier = Modifier.height(4.dp))
@@ -457,7 +476,7 @@ fun CharacterDetailScreen(
             // ---- 3 life photos (real image when the backend has one, else placeholder) ----
             item {
                 Text(
-                    text = "生活照",
+                    text = stringResource(R.string.character_life_photos),
                     style = MaterialTheme.typography.titleLarge
                 )
             }
@@ -482,7 +501,8 @@ fun CharacterDetailScreen(
                                     .data(photoUrl)
                                     .crossfade(true)
                                     .build(),
-                                contentDescription = photo.scene ?: "生活照",
+                                contentDescription = photo.scene
+                                    ?: stringResource(R.string.character_photo_fallback),
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -493,19 +513,19 @@ fun CharacterDetailScreen(
                             Spacer(modifier = Modifier.height(8.dp))
                         }
                         Text(
-                            text = photo.scene ?: "生活照",
+                            text = photo.scene ?: stringResource(R.string.character_photo_fallback),
                             style = MaterialTheme.typography.bodyLarge
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = photo.label ?: "AI 生成 · 虚拟人物",
+                            text = photo.label ?: stringResource(R.string.character_ai_label),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
                         if (!showReal) {
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "照片尚未上线，这里不是真人照片",
+                                text = stringResource(R.string.character_photo_not_live),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
@@ -515,16 +535,43 @@ fun CharacterDetailScreen(
                 }
             }
             item {
-                Button(
-                    onClick = onWriteClick,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                ) {
-                    Text(text = stringResource(R.string.character_write))
+                if (isRegistered) {
+                    Button(
+                        onClick = onWriteClick,
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Text(text = stringResource(R.string.character_write))
+                    }
+                } else {
+                    // Anonymous browsing: the entry is visibly disabled
+                    // and says why, with a direct route to register —
+                    // never let the user write a whole letter first and
+                    // only then discover they cannot send it.
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {},
+                            enabled = false,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(text = stringResource(R.string.character_write))
+                        }
+                        Text(
+                            text = stringResource(R.string.err_email_required),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedButton(
+                            onClick = onRegisterClick,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(text = stringResource(R.string.account_login_register))
+                        }
+                    }
                 }
             }
             item {
                 Text(
-                    text = "${stringResource(R.string.character_thread)}（${thread.size}）",
+                    text = stringResource(R.string.character_thread_count, thread.size),
                     style = MaterialTheme.typography.titleLarge
                 )
             }
@@ -596,8 +643,10 @@ fun LetterRow(letter: LetterDto, onClick: () -> Unit) {
             }
             Text(
                 text = listOfNotNull(
-                    "发信时间：${formatDateTimeShanghai(letter.createdAt)}"
-                        .takeIf { !letter.createdAt.isNullOrBlank() },
+                    stringResource(
+                        R.string.home_sent_time,
+                        formatDateTimeShanghai(letter.createdAt)
+                    ).takeIf { !letter.createdAt.isNullOrBlank() },
                     letterReadLine(letter),
                     expectedReplyText(letter.expectedReplyAt, letter.replyDueAt)
                         .takeIf { it.isNotBlank() && letter.direction == "user" }
@@ -612,14 +661,15 @@ fun LetterRow(letter: LetterDto, onClick: () -> Unit) {
 // ---------- Write a letter ----------
 
 class WriteLetterViewModel(
-    private val repository: PenpalRepository
+    private val repository: PenpalRepository,
+    private val settings: SettingsStore
 ) : ViewModel() {
 
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending
 
-    private val _notice = MutableStateFlow<String?>(null)
-    val notice: StateFlow<String?> = _notice
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice
 
     /** The letter just sent (null until a send succeeds). The screen shows
      * its backend-computed expected reply time instead of popping away. */
@@ -628,10 +678,25 @@ class WriteLetterViewModel(
 
     fun send(characterId: String, text: String) {
         viewModelScope.launch {
+            // Defence in depth for the write gate: anonymous accounts
+            // never reach the API (the UI disables the entry, and the
+            // server 403s too) — show the localised prompt instead.
+            if (settings.accountEmail.first() == null) {
+                _notice.value = Notice(R.string.err_email_required)
+                return@launch
+            }
             _isSending.value = true
             repository.sendLetter(characterId, text.trim())
                 .onSuccess { _sentLetter.value = it }
-                .onFailure { _notice.value = it.userMessage() }
+                .onFailure {
+                    _notice.value = it.userNotice()
+                    // A failed send can mean the server already holds a
+                    // letter we have not cached (e.g. the 409
+                    // unanswered-letter case): pull the timeline so Home
+                    // shows it with its delivery status + expected reply
+                    // time instead of "还没有信".
+                    runCatching { repository.refreshLetters() }
+                }
             _isSending.value = false
         }
     }
@@ -647,7 +712,10 @@ fun WriteLetterScreen(
     characterId: String,
     viewModel: WriteLetterViewModel,
     onSent: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    /** False = anonymous browsing: show the gate, not the editor. */
+    isRegistered: Boolean = true,
+    onRegisterClick: () -> Unit = {}
 ) {
     var text by remember { mutableStateOf("") }
     val isSending by viewModel.isSending.collectAsState()
@@ -655,8 +723,9 @@ fun WriteLetterScreen(
     val sentLetter by viewModel.sentLetter.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(notice) {
-        notice?.let {
+    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
+    LaunchedEffect(noticeText) {
+        noticeText?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearNotice()
         }
@@ -669,12 +738,43 @@ fun WriteLetterScreen(
                 title = { Text(text = stringResource(R.string.letter_write_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.action_back)
+                        )
                     }
                 }
             )
         }
     ) { padding ->
+        if (!isRegistered) {
+            // ---- Anonymous gate: no editor at all, just the prompt and
+            // a direct route to register. ----
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.err_email_required),
+                    style = MaterialTheme.typography.headlineMedium
+                )
+                Text(
+                    text = stringResource(R.string.account_not_logged_in),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = onRegisterClick,
+                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                ) {
+                    Text(text = stringResource(R.string.account_login_register))
+                }
+            }
+            return@Scaffold
+        }
         val sent = sentLetter
         if (sent != null) {
             // ---- Sent: show the backend's expected reply time + the rules ----
@@ -686,7 +786,7 @@ fun WriteLetterScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "信已寄出",
+                    text = stringResource(R.string.letter_sent_title),
                     style = MaterialTheme.typography.headlineMedium
                 )
                 val expected = expectedReplyText(sent.expectedReplyAt, sent.replyDueAt)
@@ -705,11 +805,11 @@ fun WriteLetterScreen(
                     )
                 }
                 Text(
-                    text = "第一封信对方今天就会回；之后免费每 3 天回一封，会员每天回一封。这不是即时秒回，是慢信，请耐心等一等。",
+                    text = stringResource(R.string.letter_sent_rules),
                     style = MaterialTheme.typography.bodyLarge
                 )
                 Text(
-                    text = "回信到了会在首页时间线里出现，也会收到提醒。",
+                    text = stringResource(R.string.letter_sent_reminder),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -717,7 +817,7 @@ fun WriteLetterScreen(
                     onClick = onSent,
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {
-                    Text(text = "完成")
+                    Text(text = stringResource(R.string.action_done))
                 }
             }
             return@Scaffold
@@ -730,7 +830,7 @@ fun WriteLetterScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "第一封信对方今天就会回；之后免费每 3 天回一封，会员每天回一封。这不是即时秒回，是慢信。每天最多寄 1 封信。",
+                text = stringResource(R.string.letter_write_intro),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -782,8 +882,8 @@ class LetterDetailViewModel(
     private val _letter = MutableStateFlow<LetterDto?>(null)
     val letter: StateFlow<LetterDto?> = _letter
 
-    private val _notice = MutableStateFlow<String?>(null)
-    val notice: StateFlow<String?> = _notice
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice
 
     fun load(letterId: Int) {
         viewModelScope.launch {
@@ -807,7 +907,7 @@ class LetterDetailViewModel(
                     repository.refreshLetters()
                     onMarked?.invoke()
                 }
-                .onFailure { _notice.value = it.userMessage() }
+                .onFailure { _notice.value = it.userNotice() }
         }
     }
 
@@ -827,8 +927,9 @@ fun LetterDetailScreen(
     val notice by viewModel.notice.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(notice) {
-        notice?.let {
+    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
+    LaunchedEffect(noticeText) {
+        noticeText?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearNotice()
         }
@@ -859,7 +960,10 @@ fun LetterDetailScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.action_back)
+                        )
                     }
                 }
             )
@@ -939,7 +1043,7 @@ fun LetterDetailScreen(
                             )
                         } else {
                             Text(
-                                text = "第一封当天回，之后免费每 3 天回一封、会员每天回一封；不是即时秒回，是慢信。",
+                                text = stringResource(R.string.letter_detail_rule),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

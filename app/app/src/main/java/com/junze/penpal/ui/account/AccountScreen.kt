@@ -34,14 +34,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.junze.penpal.R
 import com.junze.penpal.data.api.CaptchaResult
 import com.junze.penpal.data.prefs.SettingsStore
 import com.junze.penpal.data.repository.PenpalRepository
-import com.junze.penpal.ui.components.userMessage
+import com.junze.penpal.ui.components.Notice
+import com.junze.penpal.ui.components.isValidDisplayName
+import com.junze.penpal.ui.components.userNotice
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -65,6 +69,10 @@ class AccountViewModel(
     val emailVerified: StateFlow<Boolean> = settings.emailVerified
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    /** Virtual-world name chosen at registration (null = not set yet). */
+    val displayName: StateFlow<String?> = settings.displayName
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     private val _mode = MutableStateFlow(AuthMode.LOGIN)
     val mode: StateFlow<AuthMode> = _mode
 
@@ -74,8 +82,10 @@ class AccountViewModel(
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy
 
-    private val _notice = MutableStateFlow<String?>(null)
-    val notice: StateFlow<String?> = _notice
+    // Notices are resource ids (+ format args), resolved with
+    // stringResource at the screen — never a raw backend string.
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice
 
     /**
      * True only right after a successful registration, until the user
@@ -100,7 +110,7 @@ class AccountViewModel(
         viewModelScope.launch {
             repository.getCaptcha()
                 .onSuccess { _captcha.value = it }
-                .onFailure { _notice.value = "验证码加载失败：服务器未连接，请稍后再试" }
+                .onFailure { _notice.value = Notice(R.string.account_captcha_load_failed) }
         }
     }
 
@@ -108,21 +118,26 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.loginEmail(email.trim(), password)
-                .onSuccess { _notice.value = "登录成功" }
-                .onFailure { _notice.value = it.userMessage() }
+                .onSuccess { _notice.value = Notice(R.string.account_login_success) }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
 
-    fun register(email: String, password: String, age: Int, captchaText: String) {
+    fun register(email: String, password: String, age: Int, captchaText: String, displayName: String) {
+        val name = displayName.trim()
+        if (!isValidDisplayName(name)) {
+            _notice.value = Notice(R.string.err_invalid_display_name)
+            return
+        }
         val token = _captcha.value?.token
         if (token.isNullOrBlank()) {
-            _notice.value = "请先加载验证码"
+            _notice.value = Notice(R.string.account_captcha_required)
             return
         }
         viewModelScope.launch {
             _busy.value = true
-            repository.register(email.trim(), password, age, token, captchaText.trim())
+            repository.register(email.trim(), password, age, token, captchaText.trim(), name)
                 .onSuccess {
                     // Register returns a token (flat AuthResponse), and
                     // saveAccountSession already stored it: the user IS
@@ -132,7 +147,7 @@ class AccountViewModel(
                     _notice.value = null
                 }
                 .onFailure {
-                    _notice.value = it.userMessage()
+                    _notice.value = it.userNotice()
                     loadCaptcha() // a failed attempt consumes the challenge
                 }
             _busy.value = false
@@ -143,8 +158,8 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.sendCode(email.trim(), "verify")
-                .onSuccess { _notice.value = "验证码已发送，请查收邮箱" }
-                .onFailure { _notice.value = it.userMessage() }
+                .onSuccess { _notice.value = Notice(R.string.account_code_sent) }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
@@ -153,8 +168,8 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.verifyEmail(email.trim(), code.trim())
-                .onSuccess { _notice.value = "邮箱验证成功，现在可以改密/找回密码了" }
-                .onFailure { _notice.value = it.userMessage() }
+                .onSuccess { _notice.value = Notice(R.string.account_verify_success) }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
@@ -163,8 +178,8 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.forgotPassword(email.trim())
-                .onSuccess { _notice.value = "如果该邮箱已注册且已验证，重置密码的邮件已发送" }
-                .onFailure { _notice.value = it.userMessage() }
+                .onSuccess { _notice.value = Notice(R.string.account_forgot_sent) }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
@@ -174,10 +189,10 @@ class AccountViewModel(
             _busy.value = true
             repository.resetPassword(email.trim(), code.trim(), newPassword)
                 .onSuccess {
-                    _notice.value = "密码已重置，请用新密码登录"
+                    _notice.value = Notice(R.string.account_reset_done)
                     _mode.value = AuthMode.LOGIN
                 }
-                .onFailure { _notice.value = it.userMessage() }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
@@ -186,8 +201,8 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.changePassword(current, new)
-                .onSuccess { _notice.value = "密码已修改" }
-                .onFailure { _notice.value = it.userMessage() }
+                .onSuccess { _notice.value = Notice(R.string.account_password_changed) }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
@@ -198,9 +213,9 @@ class AccountViewModel(
             repository.logout()
                 .onSuccess {
                     _justRegistered.value = false
-                    _notice.value = "已退出登录（仍可用设备号写信）"
+                    _notice.value = Notice(R.string.account_logged_out)
                 }
-                .onFailure { _notice.value = it.userMessage() }
+                .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
     }
@@ -221,6 +236,7 @@ fun AccountScreen(
 ) {
     val accountEmail by viewModel.accountEmail.collectAsState()
     val emailVerified by viewModel.emailVerified.collectAsState()
+    val accountDisplayName by viewModel.displayName.collectAsState()
     val justRegistered by viewModel.justRegistered.collectAsState()
     val mode by viewModel.mode.collectAsState()
     val captcha by viewModel.captcha.collectAsState()
@@ -228,8 +244,9 @@ fun AccountScreen(
     val notice by viewModel.notice.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(notice) {
-        notice?.let {
+    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
+    LaunchedEffect(noticeText) {
+        noticeText?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearNotice()
         }
@@ -239,6 +256,7 @@ fun AccountScreen(
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
     var ageText by remember { mutableStateOf("") }
+    var displayName by remember { mutableStateOf("") }
     var captchaText by remember { mutableStateOf("") }
     var privacyChecked by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
@@ -254,9 +272,9 @@ fun AccountScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text(text = "账号") },
+                title = { Text(text = stringResource(R.string.account_title)) },
                 navigationIcon = {
-                    TextButton(onClick = onBack) { Text(text = "返回") }
+                    TextButton(onClick = onBack) { Text(text = stringResource(R.string.action_back)) }
                 }
             )
         }
@@ -277,13 +295,13 @@ fun AccountScreen(
                         OutlinedButton(
                             onClick = { viewModel.setMode(AuthMode.LOGIN) },
                             enabled = mode != AuthMode.LOGIN
-                        ) { Text(text = "登录") }
+                        ) { Text(text = stringResource(R.string.account_login)) }
                         OutlinedButton(
                             onClick = { viewModel.setMode(AuthMode.REGISTER) },
                             enabled = mode != AuthMode.REGISTER
-                        ) { Text(text = "注册") }
+                        ) { Text(text = stringResource(R.string.account_register)) }
                         TextButton(onClick = { viewModel.setMode(AuthMode.FORGOT) }) {
-                            Text(text = "忘记密码")
+                            Text(text = stringResource(R.string.account_forgot))
                         }
                     }
                 }
@@ -291,7 +309,7 @@ fun AccountScreen(
                     OutlinedTextField(
                         value = email,
                         onValueChange = { email = it },
-                        label = { Text(text = "邮箱") },
+                        label = { Text(text = stringResource(R.string.account_email)) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
@@ -302,7 +320,7 @@ fun AccountScreen(
                             OutlinedTextField(
                                 value = password,
                                 onValueChange = { password = it },
-                                label = { Text(text = "密码") },
+                                label = { Text(text = stringResource(R.string.account_password)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
                                 visualTransformation = PasswordVisualTransformation()
@@ -313,22 +331,45 @@ fun AccountScreen(
                                 onClick = { viewModel.login(email, password) },
                                 enabled = !busy && email.isNotBlank() && password.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth().height(48.dp)
-                            ) { Text(text = "登录") }
+                            ) { Text(text = stringResource(R.string.account_login)) }
                         }
                         item {
                             Text(
-                                text = "未验证邮箱也可以正常使用；修改密码和找回密码需要先验证邮箱。",
+                                text = stringResource(R.string.account_login_hint),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
                     AuthMode.REGISTER -> {
+                        // ---- Virtual-world name (required): the name pen
+                        // pals call the user by. Explicitly NOT a real
+                        // name — see the hint below the field. ----
+                        item {
+                            OutlinedTextField(
+                                value = displayName,
+                                onValueChange = { displayName = it.take(20) },
+                                label = { Text(text = stringResource(R.string.account_display_name)) },
+                                placeholder = { Text(text = stringResource(R.string.account_display_name_placeholder)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                isError = displayName.isNotBlank() && !isValidDisplayName(displayName),
+                                supportingText = {
+                                    Text(
+                                        text = if (displayName.isNotBlank() && !isValidDisplayName(displayName)) {
+                                            stringResource(R.string.account_display_name_invalid)
+                                        } else {
+                                            stringResource(R.string.account_display_name_hint)
+                                        }
+                                    )
+                                }
+                            )
+                        }
                         item {
                             OutlinedTextField(
                                 value = password,
                                 onValueChange = { password = it },
-                                label = { Text(text = "密码（至少 8 位）") },
+                                label = { Text(text = stringResource(R.string.account_password_hint)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
                                 visualTransformation = PasswordVisualTransformation()
@@ -338,7 +379,7 @@ fun AccountScreen(
                             OutlinedTextField(
                                 value = confirmPassword,
                                 onValueChange = { confirmPassword = it },
-                                label = { Text(text = "确认密码") },
+                                label = { Text(text = stringResource(R.string.account_password_confirm)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
                                 visualTransformation = PasswordVisualTransformation()
@@ -348,7 +389,7 @@ fun AccountScreen(
                             OutlinedTextField(
                                 value = ageText,
                                 onValueChange = { ageText = it.filter { c -> c.isDigit() }.take(3) },
-                                label = { Text(text = "年龄（未满 14 岁不能注册）") },
+                                label = { Text(text = stringResource(R.string.account_age_hint)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true
                             )
@@ -362,7 +403,7 @@ fun AccountScreen(
                                 if (bitmap != null) {
                                     Image(
                                         bitmap = bitmap.asImageBitmap(),
-                                        contentDescription = "验证码图片",
+                                        contentDescription = stringResource(R.string.account_captcha_image_desc),
                                         modifier = Modifier
                                             .fillMaxWidth(0.6f)
                                             .height(60.dp)
@@ -371,7 +412,7 @@ fun AccountScreen(
                                     CircularProgressIndicator()
                                 }
                                 OutlinedButton(onClick = { viewModel.loadCaptcha() }) {
-                                    Text(text = "换一张")
+                                    Text(text = stringResource(R.string.account_captcha_refresh))
                                 }
                             }
                         }
@@ -379,7 +420,7 @@ fun AccountScreen(
                             OutlinedTextField(
                                 value = captchaText,
                                 onValueChange = { captchaText = it },
-                                label = { Text(text = "图中验证码") },
+                                label = { Text(text = stringResource(R.string.account_captcha)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true
                             )
@@ -390,9 +431,9 @@ fun AccountScreen(
                                     checked = privacyChecked,
                                     onCheckedChange = { privacyChecked = it }
                                 )
-                                Text(text = "我已阅读并同意")
+                                Text(text = stringResource(R.string.account_privacy_agree))
                                 Text(
-                                    text = "《隐私协议》",
+                                    text = stringResource(R.string.account_privacy),
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.clickable { onPrivacyClick() }
                                 )
@@ -402,19 +443,20 @@ fun AccountScreen(
                             val age = ageText.toIntOrNull()
                             Button(
                                 onClick = {
-                                    viewModel.register(email, password, age ?: 0, captchaText)
+                                    viewModel.register(email, password, age ?: 0, captchaText, displayName)
                                 },
                                 enabled = !busy && email.isNotBlank() && password.length >= 8 &&
                                     password == confirmPassword && age != null && age >= 14 &&
+                                    isValidDisplayName(displayName.trim()) &&
                                     captchaText.isNotBlank() && privacyChecked,
                                 modifier = Modifier.fillMaxWidth().height(48.dp)
-                            ) { Text(text = "注册") }
+                            ) { Text(text = stringResource(R.string.account_register)) }
                         }
                     }
                     AuthMode.FORGOT -> {
                         item {
                             Text(
-                                text = "输入注册邮箱，我们会发一封带验证码的邮件（仅已验证的邮箱能收到）",
+                                text = stringResource(R.string.account_forgot_hint),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -424,13 +466,13 @@ fun AccountScreen(
                                 onClick = { viewModel.forgotPassword(email) },
                                 enabled = !busy && email.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth().height(48.dp)
-                            ) { Text(text = "发送验证码") }
+                            ) { Text(text = stringResource(R.string.account_send_code)) }
                         }
                         item {
                             OutlinedTextField(
                                 value = code,
                                 onValueChange = { code = it },
-                                label = { Text(text = "邮箱验证码（6 位）") },
+                                label = { Text(text = stringResource(R.string.account_code)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true
                             )
@@ -439,7 +481,7 @@ fun AccountScreen(
                             OutlinedTextField(
                                 value = newPassword,
                                 onValueChange = { newPassword = it },
-                                label = { Text(text = "新密码（至少 8 位）") },
+                                label = { Text(text = stringResource(R.string.account_new_password)) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
                                 visualTransformation = PasswordVisualTransformation()
@@ -450,7 +492,7 @@ fun AccountScreen(
                                 onClick = { viewModel.resetPassword(email, code, newPassword) },
                                 enabled = !busy && code.length == 6 && newPassword.length >= 8,
                                 modifier = Modifier.fillMaxWidth().height(48.dp)
-                            ) { Text(text = "重置密码") }
+                            ) { Text(text = stringResource(R.string.account_reset_password)) }
                         }
                     }
                 }
@@ -460,27 +502,36 @@ fun AccountScreen(
                     // ---- Registration success state ----
                     item {
                         Text(
-                            text = "注册成功",
+                            text = stringResource(R.string.account_register_success),
                             style = MaterialTheme.typography.headlineMedium
                         )
                     }
                     item {
                         Text(
-                            text = "已经自动登录，不用再输一遍密码。邮箱未验证也可以正常使用，验证只是为了改密码 / 找回密码。",
+                            text = stringResource(R.string.account_register_hint),
                             style = MaterialTheme.typography.bodyLarge
                         )
+                    }
+                    if (!accountDisplayName.isNullOrBlank()) {
+                        item {
+                            Text(
+                                text = stringResource(R.string.account_display_name) + "：" + accountDisplayName,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                            )
+                        }
                     }
                     item {
                         Button(
                             onClick = onGoWrite,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "先去写信") }
+                        ) { Text(text = stringResource(R.string.account_go_write)) }
                     }
                     item {
                         OutlinedButton(
                             onClick = { viewModel.dismissRegisterSuccess() },
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "稍后再验证") }
+                        ) { Text(text = stringResource(R.string.account_verify_later)) }
                     }
                 }
                 item {
@@ -489,7 +540,8 @@ fun AccountScreen(
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        text = if (emailVerified) "邮箱已验证" else "邮箱未验证（可正常使用；改密码、找回密码需先验证）",
+                        text = if (emailVerified) stringResource(R.string.account_verified)
+                        else stringResource(R.string.account_unverified),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -500,13 +552,13 @@ fun AccountScreen(
                             onClick = { viewModel.sendVerifyCode(accountEmail!!) },
                             enabled = !busy,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "发送验证码") }
+                        ) { Text(text = stringResource(R.string.account_send_code)) }
                     }
                     item {
                         OutlinedTextField(
                             value = code,
                             onValueChange = { code = it },
-                            label = { Text(text = "邮箱验证码（6 位）") },
+                            label = { Text(text = stringResource(R.string.account_code)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -516,7 +568,7 @@ fun AccountScreen(
                             onClick = { viewModel.verifyEmail(accountEmail!!, code) },
                             enabled = !busy && code.length == 6,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "验证邮箱") }
+                        ) { Text(text = stringResource(R.string.account_verify_email)) }
                     }
                     // The verify page is never a dead end: write first,
                     // or leave and verify later.
@@ -524,23 +576,26 @@ fun AccountScreen(
                         OutlinedButton(
                             onClick = onGoWrite,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "先去写信") }
+                        ) { Text(text = stringResource(R.string.account_go_write)) }
                     }
                     item {
                         TextButton(
                             onClick = onGoHome,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "稍后再验证，回到首页") }
+                        ) { Text(text = stringResource(R.string.account_verify_go_home)) }
                     }
                 } else {
                     item {
-                        Text(text = "修改密码", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = stringResource(R.string.account_change_password),
+                            style = MaterialTheme.typography.titleMedium
+                        )
                     }
                     item {
                         OutlinedTextField(
                             value = currentPassword,
                             onValueChange = { currentPassword = it },
-                            label = { Text(text = "当前密码") },
+                            label = { Text(text = stringResource(R.string.account_current_password)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             visualTransformation = PasswordVisualTransformation()
@@ -550,7 +605,7 @@ fun AccountScreen(
                         OutlinedTextField(
                             value = newPassword,
                             onValueChange = { newPassword = it },
-                            label = { Text(text = "新密码（至少 8 位）") },
+                            label = { Text(text = stringResource(R.string.account_new_password)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             visualTransformation = PasswordVisualTransformation()
@@ -561,7 +616,7 @@ fun AccountScreen(
                             onClick = { viewModel.changePassword(currentPassword, newPassword) },
                             enabled = !busy && currentPassword.isNotBlank() && newPassword.length >= 8,
                             modifier = Modifier.fillMaxWidth().height(48.dp)
-                        ) { Text(text = "修改密码") }
+                        ) { Text(text = stringResource(R.string.account_change_password)) }
                     }
                 }
                 item {
@@ -569,7 +624,7 @@ fun AccountScreen(
                         onClick = { viewModel.logout() },
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth().height(48.dp)
-                    ) { Text(text = "退出登录") }
+                    ) { Text(text = stringResource(R.string.account_logout)) }
                 }
             }
             item { Spacer(modifier = Modifier.height(16.dp)) }
