@@ -15,7 +15,9 @@ import hashlib
 import hmac
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
+
+from .errors import ApiError
 from pydantic import BaseModel, Field
 
 from . import database
@@ -68,7 +70,7 @@ def _new_session(response: Response) -> None:
 def require_admin(request: Request) -> str:
     token = request.cookies.get(ADMIN_COOKIE)
     if not token or not database.admin_session_valid(token):
-        raise HTTPException(status_code=401, detail="admin login required")
+        raise ApiError(401, "admin_login_required", "admin login required")
     return token
 
 
@@ -89,7 +91,7 @@ def admin_status(request: Request):
 @router.post("/setup")
 def admin_setup(body: PasswordIn, response: Response):
     if _password_set():
-        raise HTTPException(status_code=400, detail="admin password already set")
+        raise ApiError(400, "admin_password_already_set", "admin password already set")
     database.set_setting("admin.password_hash", hash_password(body.password))
     _new_session(response)
     return {"ok": True}
@@ -99,7 +101,7 @@ def admin_setup(body: PasswordIn, response: Response):
 def admin_login(body: PasswordIn, response: Response):
     stored = database.get_setting("admin.password_hash", "")
     if not stored or not verify_password(body.password, stored):
-        raise HTTPException(status_code=401, detail="wrong password")
+        raise ApiError(401, "admin_wrong_password", "wrong password")
     _new_session(response)
     return {"ok": True}
 
@@ -138,7 +140,7 @@ def _validate_settings(values: dict) -> dict[str, str]:
     cleaned: dict[str, str] = {}
     for key, raw in values.items():
         if key not in SETTABLE_KEYS:
-            raise HTTPException(status_code=400, detail=f"unknown setting: {key}")
+            raise ApiError(400, "unknown_setting", f"unknown setting: {key}")
         if key in database.SECRET_SETTINGS:
             if raw is None:
                 continue
@@ -150,7 +152,7 @@ def _validate_settings(values: dict) -> dict[str, str]:
         if key == "llm.default_provider":
             val = str(raw).strip()
             if val not in PROVIDER_NAMES:
-                raise HTTPException(status_code=400, detail=f"unknown LLM provider: {val}")
+                raise ApiError(400, "unknown_llm_provider", f"unknown LLM provider: {val}")
             cleaned[key] = val
         elif key in ("membership.paywalled", "memory.evolution_enabled",
                      "memory.reflection_enabled") or key.endswith(".enabled"):
@@ -159,17 +161,17 @@ def _validate_settings(values: dict) -> dict[str, str]:
             try:
                 n = int(raw)
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="consolidation interval must be an integer")
+                raise ApiError(400, "invalid_consolidation_interval", "consolidation interval must be an integer")
             if not 1 <= n <= 7:
-                raise HTTPException(status_code=400, detail="consolidation interval must be 1-7 days")
+                raise ApiError(400, "invalid_consolidation_interval", "consolidation interval must be 1-7 days")
             cleaned[key] = str(n)
         elif key == "smtp.port":
             try:
                 n = int(raw)
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="SMTP port must be an integer")
+                raise ApiError(400, "invalid_smtp_port", "SMTP port must be an integer")
             if not 1 <= n <= 65535:
-                raise HTTPException(status_code=400, detail="SMTP port must be 1-65535")
+                raise ApiError(400, "invalid_smtp_port", "SMTP port must be 1-65535")
             cleaned[key] = str(n)
         elif key == "smtp.ssl":
             cleaned[key] = "1" if raw in (True, 1, "1", "true", "on") else "0"
@@ -177,9 +179,9 @@ def _validate_settings(values: dict) -> dict[str, str]:
             try:
                 n = float(raw)
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="price must be a number")
+                raise ApiError(400, "invalid_price", "price must be a number")
             if n < 0:
-                raise HTTPException(status_code=400, detail="price must be >= 0")
+                raise ApiError(400, "invalid_price", "price must be >= 0")
             cleaned[key] = str(n)
         else:
             cleaned[key] = str(raw).strip() if raw is not None else ""
@@ -233,7 +235,7 @@ def admin_update_message(msg_id: str, body: MessageIn, request: Request):
          "audience": body.audience.strip() or "all", "active": 1 if body.active else 0},
     )
     if not updated:
-        raise HTTPException(status_code=404, detail="message not found")
+        raise ApiError(404, "message_not_found", "message not found")
     return updated
 
 
@@ -241,7 +243,7 @@ def admin_update_message(msg_id: str, body: MessageIn, request: Request):
 def admin_delete_message(msg_id: str, request: Request):
     require_admin(request)
     if not database.delete_message(msg_id):
-        raise HTTPException(status_code=404, detail="message not found")
+        raise ApiError(404, "message_not_found", "message not found")
     return {"ok": True}
 
 
@@ -292,7 +294,7 @@ def admin_update_activity(act_id: str, body: ActivityIn, request: Request):
         },
     )
     if not updated:
-        raise HTTPException(status_code=404, detail="activity not found")
+        raise ApiError(404, "activity_not_found", "activity not found")
     return updated
 
 
@@ -300,5 +302,5 @@ def admin_update_activity(act_id: str, body: ActivityIn, request: Request):
 def admin_delete_activity(act_id: str, request: Request):
     require_admin(request)
     if not database.delete_activity(act_id):
-        raise HTTPException(status_code=404, detail="activity not found")
+        raise ApiError(404, "activity_not_found", "activity not found")
     return {"ok": True}

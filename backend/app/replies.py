@@ -38,7 +38,8 @@ def process_due_replies(device_id: str, day: str | None = None) -> dict:
         char = database.character_for_llm(letter["character_id"], device_id)
         if not char:
             result["failed"] += 1
-            result["details"].append({"letter_id": letter["id"], "status": "character_not_found"})
+            result["details"].append({"letter_id": letter["id"], "status": "character_not_found",
+                                      "code": "character_not_found"})
             continue
         try:
             context = build_reply_context(device_id, letter["character_id"])
@@ -46,11 +47,15 @@ def process_due_replies(device_id: str, day: str | None = None) -> dict:
         except LLMNotConfigured:
             result["queued"] += 1
             result["llm_unavailable"] = True
-            result["details"].append({"letter_id": letter["id"], "status": "queued_no_llm"})
+            result["details"].append({"letter_id": letter["id"], "status": "queued_no_llm",
+                                      "code": "llm_not_configured"})
             continue
         except LLMError as e:
             result["failed"] += 1
-            result["details"].append({"letter_id": letter["id"], "status": "failed", "error": str(e)[:200]})
+            code = ("content_filter_failed" if "content filter" in str(e)
+                    else "reply_generation_failed")
+            result["details"].append({"letter_id": letter["id"], "status": "failed",
+                                      "code": code, "error": str(e)[:200]})
             continue
         reply = database.create_reply_letter(device_id, letter["character_id"], text)
         # mark_letter_replied also records character_read_at on the

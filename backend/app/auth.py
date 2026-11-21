@@ -13,10 +13,11 @@ import hashlib
 import hmac
 import secrets
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import database
+from .errors import ApiError
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -48,15 +49,15 @@ def verify_token(token: str) -> str:
         b64_id, nonce, sig = token.split(".")
         device_id = _b64d(b64_id)
     except (ValueError, Exception):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+        raise ApiError(status.HTTP_401_UNAUTHORIZED, "invalid_token", "invalid token")
     payload = f"{device_id}.{nonce}"
     expected = hmac.new(
         _secret().encode(), payload.encode(), hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(expected, sig):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+        raise ApiError(status.HTTP_401_UNAUTHORIZED, "invalid_token", "invalid token")
     if not database.device_exists(device_id):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unknown device")
+        raise ApiError(status.HTTP_401_UNAUTHORIZED, "unknown_device", "unknown device")
     return device_id
 
 
@@ -64,8 +65,9 @@ def get_current_device(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:
     if creds is None or creds.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing bearer token",
+        raise ApiError(
+            status.HTTP_401_UNAUTHORIZED,
+            "missing_token",
+            "missing bearer token",
         )
     return verify_token(creds.credentials)

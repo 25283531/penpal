@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
@@ -34,6 +35,11 @@ from . import admin, database, email_auth, evolution
 from .auth import get_current_device, issue_token
 from .characters import BY_ID, PHOTO_FILES, public_character
 from .content_filter import validate_user_letter
+from .errors import (
+    ApiError,
+    http_exception_handler,
+    validation_exception_handler,
+)
 from .llm import list_llm_providers
 from .membership import PHASE1_FREE, delivery_stage, expected_reply_at, reply_due_date, tier_for
 from .replies import process_due_replies
@@ -46,6 +52,10 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="笔友 Penpal API", version="0.1.0", lifespan=lifespan)
+# Error responses keep their existing `detail` + status, and gain a
+# stable top-level `code` (see app/errors.py) for app-side localisation.
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,10 +89,10 @@ PHOTOS_DIR = Path(__file__).resolve().parent / "static" / "photos"
 @app.get("/static/photos/{character_id}/{filename}", include_in_schema=False)
 def character_photo(character_id: str, filename: str):
     if character_id not in BY_ID or filename not in PHOTO_FILES:
-        raise HTTPException(status_code=404, detail="photo not found")
+        raise ApiError(404, "photo_not_found", "photo not found")
     path = PHOTOS_DIR / character_id / filename
     if not path.is_file():
-        raise HTTPException(status_code=404, detail="photo not found")
+        raise ApiError(404, "photo_not_found", "photo not found")
     return FileResponse(
         path,
         media_type="image/jpeg",
@@ -273,25 +283,25 @@ def _client_ip(request: Request) -> str:
 def _require_captcha_or_400(token: str | None, text: str | None) -> None:
     ok, reason = email_auth.check_captcha(token, text)
     if not ok:
-        detail = {
-            "missing": "需要图形验证码",
-            "invalid": "图形验证码无效或已过期",
-            "expired": "图形验证码已过期",
-            "wrong": "图形验证码错误",
-        }.get(reason, "图形验证码错误")
-        raise HTTPException(status_code=400, detail=detail)
+        code, detail = {
+            "missing": ("captcha_missing", "需要图形验证码"),
+            "invalid": ("captcha_invalid", "图形验证码无效或已过期"),
+            "expired": ("captcha_expired", "图形验证码已过期"),
+            "wrong": ("captcha_wrong", "图形验证码错误"),
+        }.get(reason, ("captcha_wrong", "图形验证码错误"))
+        raise ApiError(400, code, detail)
 
 
 @app.post("/api/v1/auth/register")
 def auth_register(body: RegisterIn):
     email = email_auth.normalize_email(body.email)
     if not email_auth.valid_email(email):
-        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+        raise ApiError(400, "invalid_email", "邮箱格式不正确")
     if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="密码至少 8 位")
+        raise ApiError(400, "password_too_short", "密码至少 8 位")
     _require_captcha_or_400(body.captcha_token, body.captcha_text)
     if database.get_user_by_email(email):
-        raise HTTPException(status_code=400, detail="该邮箱已注册")
+        raise ApiError(400, "email_already_registered", "该邮箱已注册")
     device_id = "email-" + secrets.token_hex(12)
     try:
         device = database.get_or_create_device(device_id, age=body.age)
@@ -315,7 +325,7 @@ def auth_login_email(body: LoginEmailIn):
     email = email_auth.normalize_email(body.email)
     user = database.get_user_by_email(email)
     if not user or not email_auth.verify_password(body.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="邮箱或密码错误")
+        raise ApiError(401, "invalid_credentials", "邮箱或密码错误")
     device_id = user["device_id"]
     database.award_point(device_id, "login")
     device = database.get_device(device_id)
@@ -356,7 +366,7 @@ def _request_code(email_raw: str, purpose: str, ip: str,
     email = email_auth.normalize_email(email_raw)
     if not email_auth.valid_email(email) or purpose not in ("verify", "reset"):
         database.record_send_failure(email, ip)
-        raise HTTPException(status_code=400, detail="请求无效")
+        raise ApiError(400, "invalid_request", "请求无效")
     if captcha_gate and _captcha_required(email, ip):
         try:
             _require_captcha_or_400(captcha_token, captcha_text)
@@ -364,7 +374,7 @@ def _request_code(email_raw: str, purpose: str, ip: str,
             database.record_send_failure(email, ip)
             raise
     if not email_auth.smtp_configured():
-        raise HTTPException(status_code=503, detail="email not configured")
+        raise ApiError(503, "email_not_configured", "email not configured")
     now = datetime.now(timezone.utc)
     # per-email 1/min, 5/hour; per-IP 10/hour
     since_min = (now - timedelta(minutes=1)).isoformat()
@@ -383,9 +393,8 @@ def _request_code(email_raw: str, purpose: str, ip: str,
         retry_after = 3600
     if retry_after is not None:
         database.record_send_failure(email, ip)
-        raise HTTPException(
-            status_code=429,
-            detail="发送过于频繁，请稍后再试",
+        raise ApiError(
+            429, "rate_limited", "发送过于频繁，请稍后再试",
             headers={"Retry-After": str(retry_after)},
         )
     database.record_send_event(email, ip)
@@ -395,9 +404,9 @@ def _request_code(email_raw: str, purpose: str, ip: str,
         try:
             email_auth.send_verification_email(email, code, purpose)
         except email_auth.SmtpNotConfigured as e:
-            raise HTTPException(status_code=503, detail="email not configured") from e
+            raise ApiError(503, "email_not_configured", "email not configured") from e
         except Exception as e:
-            raise HTTPException(status_code=503, detail="邮件发送失败，请稍后再试") from e
+            raise ApiError(503, "email_send_failed", "邮件发送失败，请稍后再试") from e
     return {"ok": True, "message": "验证码已发送"}
 
 
@@ -412,13 +421,13 @@ def auth_verify(body: VerifyIn):
     email = email_auth.normalize_email(body.email)
     ok, reason = email_auth.check_code(email, body.code)
     if not ok:
-        detail = {
-            "missing": "验证码错误或已过期",
-            "expired": "验证码已过期，请重新获取",
-            "too_many_attempts": "验证码尝试次数过多，请重新获取",
-            "wrong": "验证码错误",
-        }.get(reason, "验证码错误或已过期")
-        raise HTTPException(status_code=400, detail=detail)
+        code, detail = {
+            "missing": ("verification_code_invalid", "验证码错误或已过期"),
+            "expired": ("verification_code_expired", "验证码已过期，请重新获取"),
+            "too_many_attempts": ("verification_code_too_many_attempts", "验证码尝试次数过多，请重新获取"),
+            "wrong": ("verification_code_wrong", "验证码错误"),
+        }.get(reason, ("verification_code_invalid", "验证码错误或已过期"))
+        raise ApiError(400, code, detail)
     email_auth.consume_code(email)
     database.set_user_verified(email)
     return {"ok": True, "email_verified": True}
@@ -428,20 +437,20 @@ def auth_verify(body: VerifyIn):
 def auth_change_password(body: ChangePasswordIn, device_id: str = Depends(get_current_device)):
     user = database.get_user_by_device(device_id)
     if not user:
-        raise HTTPException(status_code=400, detail="该账号未绑定邮箱，请先注册邮箱账号")
+        raise ApiError(400, "account_email_not_bound", "该账号未绑定邮箱，请先注册邮箱账号")
     if len(body.new_password) < 8:
-        raise HTTPException(status_code=400, detail="新密码至少 8 位")
+        raise ApiError(400, "password_too_short", "新密码至少 8 位")
     if body.code:
         ok, reason = email_auth.check_code(user["email"], body.code)
         if not ok:
-            raise HTTPException(status_code=400, detail="验证码错误或已过期")
+            raise ApiError(400, "verification_code_invalid", "验证码错误或已过期")
         email_auth.consume_code(user["email"])
     elif not user["email_verified"]:
-        raise HTTPException(status_code=400, detail="邮箱未验证，请使用验证码修改密码")
+        raise ApiError(400, "email_not_verified", "邮箱未验证，请使用验证码修改密码")
     elif not body.current_password or not email_auth.verify_password(
         body.current_password, user["password_hash"]
     ):
-        raise HTTPException(status_code=400, detail="当前密码错误")
+        raise ApiError(400, "current_password_wrong", "当前密码错误")
     database.update_user_password(user["email"], email_auth.hash_password(body.new_password))
     return {"ok": True}
 
@@ -458,17 +467,17 @@ def auth_forgot_password(body: ForgotPasswordIn, request: Request):
 def auth_reset_password(body: ResetPasswordIn):
     email = email_auth.normalize_email(body.email)
     if len(body.new_password) < 8:
-        raise HTTPException(status_code=400, detail="新密码至少 8 位")
+        raise ApiError(400, "password_too_short", "新密码至少 8 位")
     user = database.get_user_by_email(email)
     if user is None:
-        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+        raise ApiError(400, "verification_code_invalid", "验证码错误或已过期")
     if not user["email_verified"] and not user["verified_at"]:
-        raise HTTPException(
-            status_code=400, detail="该邮箱未验证，无法找回密码"
+        raise ApiError(
+            400, "email_not_verified", "该邮箱未验证，无法找回密码"
         )
     ok, reason = email_auth.check_code(email, body.code)
     if not ok:
-        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+        raise ApiError(400, "verification_code_invalid", "验证码错误或已过期")
     email_auth.consume_code(email)
     database.invalidate_codes_for_email(email)
     database.update_user_password(email, email_auth.hash_password(body.new_password))
@@ -516,7 +525,7 @@ def list_characters(device_id: str = Depends(get_current_device)):
 def get_character(character_id: str, device_id: str = Depends(get_current_device)):
     char = database.get_character(character_id)
     if not char:
-        raise HTTPException(status_code=404, detail="character not found")
+        raise ApiError(404, "character_not_found", "character not found")
     unlocked = character_id in database.unlocked_character_ids(device_id)
     return {**public_character(char), "unlocked": unlocked}
 
@@ -527,28 +536,35 @@ def get_character(character_id: str, device_id: str = Depends(get_current_device
 def send_letter(body: LetterIn, device_id: str = Depends(get_current_device)):
     ok, problems = validate_user_letter(body.text)
     if not ok:
-        raise HTTPException(status_code=400, detail="; ".join(problems))
+        detail = "; ".join(problems)
+        if any(p == "letter is empty" for p in problems):
+            code = "letter_empty"
+        elif any("must be at most" in p for p in problems):
+            code = "letter_too_long"
+        else:
+            code = "invalid_letter"
+        raise ApiError(400, code, detail)
     character_id = body.character_id.strip()
     char = database.get_character(character_id)
     if not char:
-        raise HTTPException(status_code=404, detail="character not found")
+        raise ApiError(404, "character_not_found", "character not found")
     if character_id not in database.unlocked_character_ids(device_id):
-        raise HTTPException(status_code=403, detail="character is locked; unlock it first")
+        raise ApiError(403, "character_locked", "character is locked; unlock it first")
     device, tier = _device_plan(device_id)
 
     # 1. Turn-taking: one outstanding letter per character (checked
     # first so a double-send to the same character gets the specific
     # 409, not the generic daily-cap 429).
     if database.outstanding_letter(device_id, character_id):
-        raise HTTPException(
-            status_code=409,
-            detail="this character has an unanswered letter; wait for the reply before writing again",
+        raise ApiError(
+            409, "unanswered_letter",
+            "this character has an unanswered letter; wait for the reply before writing again",
         )
     # 2. Daily send cap (per user per day, not per character).
     if database.count_today_sends(device_id) >= tier["daily_send_cap"]:
-        raise HTTPException(
-            status_code=429,
-            detail=f"daily send limit reached ({tier['daily_send_cap']} letter(s) per day for the {device['plan']} plan)",
+        raise ApiError(
+            429, "daily_send_limit",
+            f"daily send limit reached ({tier['daily_send_cap']} letter(s) per day for the {device['plan']} plan)",
         )
     # 3. Relationship must be active (auto-start if a slot is free).
     rel = database.get_relationship(device_id, character_id)
@@ -556,7 +572,10 @@ def send_letter(body: LetterIn, device_id: str = Depends(get_current_device)):
         try:
             database.start_relationship(device_id, character_id, tier["max_active_characters"])
         except ValueError as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
+            # start_relationship only raises for the slot limit; the
+            # handler would infer the same code, but attach it
+            # explicitly so the code never depends on message text.
+            raise ApiError(409, "active_character_limit", str(e)) from e
 
     is_first = database.count_user_letters(device_id, character_id) == 0
     due = reply_due_date(date.today(), device["plan"], is_first)
@@ -577,9 +596,9 @@ def _thread_visible(device_id: str, character_id: str) -> None:
     rel = database.get_relationship(device_id, character_id)
     if rel and rel["status"] == "ended":
         if not rel.get("reconnect_until") or rel["reconnect_until"] < date.today().isoformat():
-            raise HTTPException(
-                status_code=410,
-                detail="this relationship ended more than 30 days ago and is no longer visible to you",
+            raise ApiError(
+                410, "relationship_expired",
+                "this relationship ended more than 30 days ago and is no longer visible to you",
             )
 
 
@@ -596,7 +615,7 @@ def list_letters(character_id: str | None = None, device_id: str = Depends(get_c
     plan = _device["plan"] if _device else "free"
     if character_id:
         if not database.get_character(character_id):
-            raise HTTPException(status_code=404, detail="character not found")
+            raise ApiError(404, "character_not_found", "character not found")
         _thread_visible(device_id, character_id)
         return [_public_letter(l, plan) for l in database.list_thread(device_id, character_id)]
     return [_public_letter(l, plan) for l in database.list_all_letters(device_id)]
@@ -606,7 +625,7 @@ def list_letters(character_id: str | None = None, device_id: str = Depends(get_c
 def get_letter(letter_id: int, device_id: str = Depends(get_current_device)):
     letter = database.get_letter(device_id, letter_id)
     if not letter:
-        raise HTTPException(status_code=404, detail="letter not found")
+        raise ApiError(404, "letter_not_found", "letter not found")
     _thread_visible(device_id, letter["character_id"])
     _device, _tier = _device_plan(device_id)
     plan = _device["plan"] if _device else "free"
@@ -617,9 +636,9 @@ def get_letter(letter_id: int, device_id: str = Depends(get_current_device)):
 def read_letter(letter_id: int, device_id: str = Depends(get_current_device)):
     letter = database.get_letter(device_id, letter_id)
     if not letter:
-        raise HTTPException(status_code=404, detail="letter not found")
+        raise ApiError(404, "letter_not_found", "letter not found")
     if letter["direction"] != "ai":
-        raise HTTPException(status_code=400, detail="only AI replies can be marked read")
+        raise ApiError(400, "not_ai_reply", "only AI replies can be marked read")
     # Unread = neither the new user_read_at nor the legacy read_at set.
     # First call records user_read_at and awards +1 (once per letter,
     # enforced by award_point's ref dedupe); repeats never overwrite.
@@ -639,7 +658,7 @@ def process_due(body: ProcessDueIn | None = None, device_id: str = Depends(get_c
     try:
         date.fromisoformat(day)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from e
+        raise ApiError(400, "invalid_date", "date must be YYYY-MM-DD") from e
     return process_due_replies(device_id, day)
 
 
@@ -654,7 +673,7 @@ def list_relationships(device_id: str = Depends(get_current_device)):
 def end_relationship(character_id: str, device_id: str = Depends(get_current_device)):
     rel = database.end_relationship(device_id, character_id)
     if not rel:
-        raise HTTPException(status_code=404, detail="relationship not found")
+        raise ApiError(404, "relationship_not_found", "relationship not found")
     return {
         **rel,
         "note": "30 天内可以再次联系到原来的人物；超过 30 天后 App 里不再显示这段关系，"
@@ -672,8 +691,10 @@ def reconnect_relationship(character_id: str, device_id: str = Depends(get_curre
     except ValueError as e:
         # Past the 30-day window: user-side gone (410).
         if "30 days" in str(e):
-            raise HTTPException(status_code=410, detail=str(e)) from e
-        raise HTTPException(status_code=409, detail=str(e)) from e
+            raise ApiError(410, "relationship_expired", str(e)) from e
+        if "active character limit" in str(e):
+            raise ApiError(409, "active_character_limit", str(e)) from e
+        raise ApiError(409, "relationship_not_found", str(e)) from e
     return rel
 
 
@@ -707,7 +728,7 @@ def record_referral(body: ReferralIn, device_id: str = Depends(get_current_devic
     try:
         return database.record_referral(device_id, body.referred_device_id.strip())
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise ApiError(400, "self_referral", str(e)) from e
 
 
 # ---------- LLM providers ----------
