@@ -221,6 +221,34 @@ class ErrorMessagesTest {
         assertEquals(3, parseLimitCount("active character limit reached (3); end first"))
     }
 
+    // ---- 18+ registration gate (400 age_under_18) ----
+
+    @Test
+    fun ageUnder18_400_byCode() {
+        val e = httpError(
+            400,
+            """{"detail":"users under 18 are not allowed to register","code":"age_under_18"}"""
+        )
+        assertEquals(ErrorMapping(ErrorKey.AGE_UNDER_18), e.errorMapping())
+    }
+
+    @Test
+    fun ageUnder18_400_byDetailOnly() {
+        // Older / codeless responses: the detail substring fallback must
+        // still find the under-18 key (never the raw English detail).
+        val e = httpError(
+            400,
+            """{"detail":"you must be 18 years old to use this app"}"""
+        )
+        assertEquals(ErrorMapping(ErrorKey.AGE_UNDER_18), e.errorMapping())
+    }
+
+    @Test
+    fun ageUnder18_400_byChineseDetailOnly() {
+        val e = httpError(400, """{"detail":"未满 18 周岁不能注册"}""")
+        assertEquals(ErrorMapping(ErrorKey.AGE_UNDER_18), e.errorMapping())
+    }
+
     // ---- Anonymous write gate (403 anonymous_letter_forbidden) ----
 
     @Test

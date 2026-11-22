@@ -14,16 +14,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -53,6 +57,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 // Public: AccountViewModel exposes StateFlow<AuthMode> and setMode(AuthMode)
 // publicly, so the type itself must be public (was `private`, which broke
@@ -138,11 +145,33 @@ class AccountViewModel(
         }
     }
 
-    fun register(email: String, password: String, age: Int, captchaText: String, displayName: String) {
+    fun register(email: String, password: String, birthDateText: String, captchaText: String, displayName: String) {
         val name = displayName.trim()
         if (!isValidDisplayName(name)) {
             _notice.value = Notice(R.string.err_invalid_display_name)
             return
+        }
+        // Local age gate first: never submit a blank / malformed / future
+        // / under-18 birth date. The backend re-checks (400 age_under_18)
+        // and that code maps to the same wording via userNotice().
+        val birthDate = when (val check = checkBirthDate(birthDateText)) {
+            BirthDateCheck.Blank -> {
+                _notice.value = Notice(R.string.err_birth_date_required)
+                return
+            }
+            BirthDateCheck.InvalidFormat -> {
+                _notice.value = Notice(R.string.err_birth_date_invalid)
+                return
+            }
+            BirthDateCheck.FutureDate -> {
+                _notice.value = Notice(R.string.err_birth_date_future)
+                return
+            }
+            is BirthDateCheck.Underage -> {
+                _notice.value = Notice(R.string.err_age_under_18)
+                return
+            }
+            is BirthDateCheck.OfAge -> formatBirthDate(parseBirthDate(birthDateText)!!)
         }
         val token = _captcha.value?.token
         if (token.isNullOrBlank()) {
@@ -151,7 +180,7 @@ class AccountViewModel(
         }
         viewModelScope.launch {
             _busy.value = true
-            repository.register(email.trim(), password, age, token, captchaText.trim(), name)
+            repository.register(email.trim(), password, birthDate, token, captchaText.trim(), name)
                 .onSuccess {
                     // Register returns a token (flat AuthResponse), and
                     // saveAccountSession already stored it: the user IS
@@ -279,7 +308,8 @@ fun AccountScreen(
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
-    var ageText by remember { mutableStateOf("") }
+    var birthDateText by remember { mutableStateOf("") }
+    var showBirthDatePicker by remember { mutableStateOf(false) }
     var displayName by remember { mutableStateOf("") }
     var captchaText by remember { mutableStateOf("") }
     var privacyChecked by remember { mutableStateOf(false) }
@@ -410,13 +440,102 @@ fun AccountScreen(
                             )
                         }
                         item {
+                            // Birth date: manual YYYY-MM-DD input + a
+                            // picker. Nothing is pre-filled and the picker
+                            // starts with no date selected — the user must
+                            // actively choose. The computed full age shows
+                            // immediately under the field.
+                            val birthCheck = checkBirthDate(birthDateText)
                             OutlinedTextField(
-                                value = ageText,
-                                onValueChange = { ageText = it.filter { c -> c.isDigit() }.take(3) },
-                                label = { Text(text = stringResource(R.string.account_age_hint)) },
+                                value = birthDateText,
+                                onValueChange = {
+                                    birthDateText = it.filter { c -> c.isDigit() || c == '-' }.take(10)
+                                },
+                                label = { Text(text = stringResource(R.string.account_birth_date)) },
+                                placeholder = { Text(text = stringResource(R.string.account_birth_date_placeholder)) },
                                 modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
+                                singleLine = true,
+                                isError = birthCheck is BirthDateCheck.InvalidFormat ||
+                                    birthCheck is BirthDateCheck.FutureDate ||
+                                    birthCheck is BirthDateCheck.Underage,
+                                supportingText = {
+                                    Text(
+                                        text = when (birthCheck) {
+                                            BirthDateCheck.Blank ->
+                                                stringResource(R.string.account_birth_date_format_hint)
+                                            BirthDateCheck.InvalidFormat ->
+                                                stringResource(R.string.err_birth_date_invalid)
+                                            BirthDateCheck.FutureDate ->
+                                                stringResource(R.string.err_birth_date_future)
+                                            is BirthDateCheck.Underage ->
+                                                stringResource(R.string.account_birth_date_underage)
+                                            is BirthDateCheck.OfAge ->
+                                                stringResource(R.string.account_birth_date_of_age, birthCheck.years)
+                                        }
+                                    )
+                                },
+                                trailingIcon = {
+                                    TextButton(onClick = { showBirthDatePicker = true }) {
+                                        Text(text = stringResource(R.string.account_birth_date_pick))
+                                    }
+                                }
                             )
+                        }
+                        // Disclaimer, verbatim per the user's wording: no
+                        // real-name / age verification is possible; the
+                        // user must enter a true age and bears legal
+                        // responsibility for a false one.
+                        item {
+                            Text(
+                                text = stringResource(R.string.account_birth_date_disclaimer),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (showBirthDatePicker) {
+                            item {
+                                val today = LocalDate.now()
+                                val pickerState = rememberDatePickerState(
+                                    yearRange = (today.year - 120)..today.year,
+                                    selectableDates = object : SelectableDates {
+                                        override fun isSelectableDate(utcTimeMillis: Long): Boolean {
+                                            // The picker hands UTC start-of-day
+                                            // millis; compare in UTC so the
+                                            // boundary is the same everywhere.
+                                            val date = Instant.ofEpochMilli(utcTimeMillis)
+                                                .atZone(ZoneOffset.UTC).toLocalDate()
+                                            return !date.isAfter(today)
+                                        }
+                                    }
+                                )
+                                DatePickerDialog(
+                                    onDismissRequest = { showBirthDatePicker = false },
+                                    confirmButton = {
+                                        TextButton(
+                                            onClick = {
+                                                pickerState.selectedDateMillis?.let { millis ->
+                                                    birthDateText = formatBirthDate(
+                                                        Instant.ofEpochMilli(millis)
+                                                            .atZone(ZoneOffset.UTC).toLocalDate()
+                                                    )
+                                                }
+                                                showBirthDatePicker = false
+                                            },
+                                            enabled = pickerState.selectedDateMillis != null
+                                        ) { Text(text = stringResource(R.string.action_confirm)) }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { showBirthDatePicker = false }) {
+                                            Text(text = stringResource(R.string.action_cancel))
+                                        }
+                                    }
+                                ) {
+                                    DatePicker(
+                                        state = pickerState,
+                                        title = { Text(text = stringResource(R.string.account_birth_date_dialog_title)) }
+                                    )
+                                }
+                            }
                         }
                         item {
                             Row(
@@ -464,13 +583,13 @@ fun AccountScreen(
                             }
                         }
                         item {
-                            val age = ageText.toIntOrNull()
+                            val birthCheck = checkBirthDate(birthDateText)
                             Button(
                                 onClick = {
-                                    viewModel.register(email, password, age ?: 0, captchaText, displayName)
+                                    viewModel.register(email, password, birthDateText, captchaText, displayName)
                                 },
                                 enabled = !busy && email.isNotBlank() && password.length >= 8 &&
-                                    password == confirmPassword && age != null && age >= 14 &&
+                                    password == confirmPassword && birthCheck is BirthDateCheck.OfAge &&
                                     isValidDisplayName(displayName.trim()) &&
                                     captchaText.isNotBlank() && privacyChecked,
                                 modifier = Modifier.fillMaxWidth().height(48.dp)

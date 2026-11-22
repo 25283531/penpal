@@ -202,19 +202,21 @@ class PenpalRepository(
     }
 
     /**
-     * Register an email account. The virtual-world name is required; the
-     * current anonymous device (id + token) is handed over so the backend
+     * Register an email account. The birth date (YYYY-MM-DD) is required
+     * and must be 18+ — the ViewModel enforces that locally first, and
+     * the backend refuses under-18s with 400 `age_under_18`. The current
+     * anonymous device (id + token) is handed over so the backend
      * migrates the trial period's data into the new account and retires
      * the anonymous identity. From then on the email account is the only
      * identity on this device.
      */
     suspend fun register(
-        email: String, password: String, age: Int, captchaToken: String, captchaText: String,
+        email: String, password: String, birthDate: String, captchaToken: String, captchaText: String,
         displayName: String
     ): Result<AuthResponse> = runCatching {
         val (deviceId, deviceToken) = anonymousLink()
         apiClient.service().register(
-            RegisterRequest(email, password, age, captchaToken, captchaText, displayName, deviceId, deviceToken)
+            RegisterRequest(email, password, birthDate, captchaToken, captchaText, displayName, deviceId, deviceToken)
         ).also { saveAccountSession(it) }
     }
 
