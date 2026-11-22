@@ -235,6 +235,24 @@ CREATE TABLE IF NOT EXISTS email_send_failures (
     ip TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- Reply scheduler runs (Bug 1 fix): one row per automatic pass, counts
+-- only — no device ids, no letter text, no letter ids. The admin
+-- dashboard reads these aggregates; a failed letter stays in_transit
+-- and is retried by the next pass, never silently dropped.
+CREATE TABLE IF NOT EXISTS scheduler_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    day TEXT NOT NULL,
+    devices INTEGER NOT NULL DEFAULT 0,
+    processed INTEGER NOT NULL DEFAULT 0,
+    replied INTEGER NOT NULL DEFAULT 0,
+    queued INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    llm_unavailable INTEGER NOT NULL DEFAULT 0,
+    error_counts TEXT NOT NULL DEFAULT '{}',
+    error TEXT
+);
 """
 
 DEFAULT_SETTINGS: dict[str, str] = {
@@ -998,6 +1016,107 @@ def due_user_letters(device_id: str, day: str) -> list[dict]:
     return _decrypt_rows([dict(r) for r in rows])
 
 
+def devices_with_due_letters(day: str) -> list[str]:
+    """Device ids that have at least one in-transit user letter whose
+    reply is due on or before `day` — i.e. exactly the devices the
+    reply scheduler needs to visit. Letters that fail (LLM error, no
+    LLM configured) stay in_transit, so they show up again next pass
+    and are retried instead of being dropped."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT device_id FROM letters"
+            " WHERE direction = 'user' AND status = 'in_transit'"
+            " AND reply_due_at IS NOT NULL AND reply_due_at <= ? ORDER BY device_id",
+            (day,),
+        ).fetchall()
+    return [r["device_id"] for r in rows]
+
+
+# ---- reply scheduler runs (aggregates only) ----
+
+SCHEDULER_RUN_COLUMNS = (
+    "id, started_at, finished_at, day, devices, processed, replied,"
+    " queued, failed, llm_unavailable, error_counts, error"
+)
+
+
+def _decode_scheduler_run(row: dict) -> dict:
+    try:
+        row["error_counts"] = json.loads(row.get("error_counts") or "{}")
+    except ValueError:
+        row["error_counts"] = {}
+    if not isinstance(row["error_counts"], dict):
+        row["error_counts"] = {}
+    row["llm_unavailable"] = bool(row.get("llm_unavailable"))
+    return row
+
+
+def record_scheduler_run(run: dict) -> dict:
+    """Persist one scheduler pass (counts only). `run` carries
+    started_at / finished_at / day / devices / processed / replied /
+    queued / failed / llm_unavailable / error_counts (dict of failure
+    code -> count) / error (top-level pass error, if any)."""
+    error_counts = run.get("error_counts") or {}
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO scheduler_runs (started_at, finished_at, day, devices,"
+            " processed, replied, queued, failed, llm_unavailable, error_counts, error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run["started_at"], run.get("finished_at"), run["day"],
+                run.get("devices", 0), run.get("processed", 0),
+                run.get("replied", 0), run.get("queued", 0),
+                run.get("failed", 0),
+                1 if run.get("llm_unavailable") else 0,
+                json.dumps(error_counts, ensure_ascii=False),
+                run.get("error"),
+            ),
+        )
+        run_id = cur.lastrowid
+    return get_scheduler_run(run_id)
+
+
+def get_scheduler_run(run_id: int) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {SCHEDULER_RUN_COLUMNS} FROM scheduler_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+    return _decode_scheduler_run(dict(row)) if row else None
+
+
+def list_scheduler_runs(limit: int = 20) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT {SCHEDULER_RUN_COLUMNS} FROM scheduler_runs"
+            " ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_decode_scheduler_run(dict(r)) for r in rows]
+
+
+def scheduler_summary() -> dict:
+    """Aggregate scheduler stats for the admin dashboard: totals across
+    all passes plus the most recent pass (counts only)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS runs, COALESCE(SUM(processed), 0) AS processed,"
+            " COALESCE(SUM(replied), 0) AS replied, COALESCE(SUM(queued), 0) AS queued,"
+            " COALESCE(SUM(failed), 0) AS failed FROM scheduler_runs"
+        ).fetchone()
+        last = conn.execute(
+            f"SELECT {SCHEDULER_RUN_COLUMNS} FROM scheduler_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return {
+        "runs": row["runs"],
+        "processed": row["processed"],
+        "replied": row["replied"],
+        "queued": row["queued"],
+        "failed": row["failed"],
+        "last_run": _decode_scheduler_run(dict(last)) if last else None,
+    }
+
+
 def _character_read_at(created_at: str | None, replied_at: str) -> str | None:
     """When the character 'read' the user's letter, as recorded when the
     reply is generated. This is NOT a precise timestamp anyone observed:
@@ -1513,6 +1632,7 @@ def dashboard_stats() -> dict:
         "dau_today": dau,
         "characters": letters_by_character(),
         "violations": violation_summary(),
+        "scheduler": scheduler_summary(),
     }
 
 # ---- M1: email users / verification codes / captchas / rate limits ----

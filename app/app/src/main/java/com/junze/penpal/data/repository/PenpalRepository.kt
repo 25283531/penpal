@@ -357,7 +357,29 @@ class PenpalRepository(
     suspend fun getUnreadCount(): Result<Int> =
         withAuth { api, header -> api.getUnreadCount(header).unreadCount }
 
+    /**
+     * App-side fallback trigger for due replies (Bug 1): POST
+     * /letters/process-due with an empty body (backend defaults to
+     * today). Best effort by design — callers ignore failures silently
+     * and never block the timeline on this. The reply letters it
+     * creates are picked up by the refreshLetters() that follows.
+     */
+    suspend fun processDue(): Result<ProcessDueResponse> =
+        withAuth { api, header -> api.processDue(header) }
+
     // ---------- Membership / points / unlocks / messages / activities ----------
+
+    /**
+     * The single shared points balance (Bug 2): Home and 我的 both
+     * read [pointsState].points. The ONLY writer is GET /points;
+     * dailyLogin is still called for its +1 award, but its returned
+     * balance is never displayed.
+     */
+    val pointsState = PointsState { getPoints().map { it.points } }
+
+    /** Refresh the shared balance from GET /points. Failure keeps the
+     * last good value and records the error — it never resets to 0. */
+    suspend fun refreshPoints(): Result<Int> = pointsState.refresh()
 
     suspend fun getMembershipStatus(): Result<MembershipStatusDto> =
         withAuth { api, header -> api.getMembershipStatus(header) }

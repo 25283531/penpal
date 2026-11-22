@@ -7,12 +7,81 @@ letter stays in_transit with status "queued" — a reply is NEVER faked.
 `process_due_replies(device_id, day)` is the manual trigger endpoint
 used by tests and by a daily job in production. `day` is injectable so
 tests can simulate "3 days later" without waiting.
+
+`process_all_due_replies(day)` is the scheduler entry point: it visits
+every device with a due letter (see database.devices_with_due_letters)
+and aggregates the per-device results. A letter that fails — LLM error
+or no LLM configured — stays in_transit, so the next pass retries it
+instead of dropping it; nothing here ever marks a letter replied
+without a real generated reply.
 """
 from datetime import date
 
 from . import database, evolution
 from .context import build_reply_context
 from .llm import LLMError, LLMNotConfigured, generate_reply_text
+
+
+def _empty_all_result(day: str) -> dict:
+    return {
+        "day": day,
+        "devices": 0,
+        "processed": 0,
+        "replied": 0,
+        "queued": 0,
+        "failed": 0,
+        "llm_unavailable": False,
+        "error_counts": {},
+        "details": [],
+    }
+
+
+def process_all_due_replies(day: str | None = None, process_fn=None) -> dict:
+    """Process every device's due letters for `day` (default today).
+
+    `process_fn` is injectable (defaults to process_due_replies) so
+    tests can drive the aggregation without an LLM. Returns the summed
+    counts plus per-device summaries and `error_counts` (failure code
+    -> count, e.g. llm_not_configured / reply_generation_failed).
+    A device whose processing raises is counted as one failure with
+    code "scheduler_device_failed" and does not stop the other devices.
+    """
+    today = day or date.today().isoformat()
+    fn = process_fn or process_due_replies
+    result = _empty_all_result(today)
+    for device_id in database.devices_with_due_letters(today):
+        result["devices"] += 1
+        try:
+            per_device = fn(device_id, today)
+        except Exception as e:  # noqa: BLE001 — one bad device must not block the rest
+            result["failed"] += 1
+            result["error_counts"]["scheduler_device_failed"] = (
+                result["error_counts"].get("scheduler_device_failed", 0) + 1
+            )
+            result["details"].append({
+                "device_id": device_id, "processed": 0, "replied": 0,
+                "queued": 0, "failed": 1, "status": "failed",
+                "code": "scheduler_device_failed", "error": str(e)[:200],
+            })
+            continue
+        result["processed"] += per_device.get("processed", 0)
+        result["replied"] += per_device.get("replied", 0)
+        result["queued"] += per_device.get("queued", 0)
+        result["failed"] += per_device.get("failed", 0)
+        if per_device.get("llm_unavailable"):
+            result["llm_unavailable"] = True
+        for detail in per_device.get("details", []):
+            code = detail.get("code")
+            if code and detail.get("status") in ("failed", "queued_no_llm"):
+                result["error_counts"][code] = result["error_counts"].get(code, 0) + 1
+        result["details"].append({
+            "device_id": device_id,
+            "processed": per_device.get("processed", 0),
+            "replied": per_device.get("replied", 0),
+            "queued": per_device.get("queued", 0),
+            "failed": per_device.get("failed", 0),
+        })
+    return result
 
 
 def process_due_replies(device_id: str, day: str | None = None) -> dict:

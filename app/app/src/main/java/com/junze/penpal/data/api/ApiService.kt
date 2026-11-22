@@ -289,6 +289,37 @@ data class UnreadCountDto(
     val unreadCount: Int = 0
 )
 
+/**
+ * POST /api/v1/letters/process-due: App-side fallback trigger for due
+ * replies (Bug 1). The backend has no scheduled job, so without this
+ * call a due reply is only generated when somebody POSTs manually.
+ * Body is `{}` (date omitted -> the backend defaults to today);
+ * `date` is only a test/simulation override ("YYYY-MM-DD").
+ * Response: {"processed": n, "replied": n, "queued": n, "failed": n,
+ * "llm_unavailable": bool, "details": [...]}. `queued` counts letters
+ * not due yet OR un-generatable (no LLM configured) — both honestly
+ * stay in_transit; a reply is never faked.
+ */
+data class ProcessDueRequest(
+    val date: String? = null
+)
+
+data class ProcessDueDetailDto(
+    val letterId: Int? = null,
+    val replyId: Int? = null,
+    val status: String? = null,
+    val code: String? = null
+)
+
+data class ProcessDueResponse(
+    val processed: Int = 0,
+    val replied: Int = 0,
+    val queued: Int = 0,
+    val failed: Int = 0,
+    val llmUnavailable: Boolean = false,
+    val details: List<ProcessDueDetailDto>? = null
+)
+
 // ---------- Membership / points / unlocks (exist in M0) ----------
 
 data class MembershipStatusDto(
@@ -448,6 +479,18 @@ interface ApiService {
     suspend fun getUnreadCount(
         @Header("Authorization") token: String
     ): UnreadCountDto
+
+    /**
+     * Generate replies for this account's due letters (App-side
+     * fallback — the backend runs no scheduler yet). Empty body means
+     * "today". Safe to call when nothing is due: it just returns
+     * processed=0. Callers treat any failure as best-effort/silent.
+     */
+    @POST("letters/process-due")
+    suspend fun processDue(
+        @Header("Authorization") token: String,
+        @Body request: ProcessDueRequest = ProcessDueRequest()
+    ): ProcessDueResponse
 
     // ---- Membership / points / unlocks ----
 

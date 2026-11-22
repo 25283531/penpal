@@ -53,12 +53,14 @@ import retrofit2.HttpException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class HomeViewModel(
     private val repository: PenpalRepository,
-    settings: SettingsStore
+    private val settings: SettingsStore
 ) : ViewModel() {
 
     val characters: StateFlow<List<CharacterDto>> = repository.characters
@@ -77,8 +79,20 @@ class HomeViewModel(
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing
 
-    private val _points = MutableStateFlow<Int?>(null)
-    val points: StateFlow<Int?> = _points
+    /**
+     * Points: the ONE shared balance (Bug 2) — [PenpalRepository.pointsState],
+     * written only by GET /points. Home and 我的 read the same flow, so
+     * the two pages can never show different numbers. Before the first
+     * successful load this is null (unknown): the UI hides the row
+     * rather than showing 0. A failed refresh keeps the last good
+     * value and surfaces [pointsError] instead of inventing 0.
+     */
+    val points: StateFlow<Int?> = repository.pointsState.points
+
+    /** Last points-refresh failure as a localised notice (null = none). */
+    val pointsError: StateFlow<Notice?> = repository.pointsState.error
+        .map { it?.userNotice() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private val _notice = MutableStateFlow<Notice?>(null)
     val notice: StateFlow<Notice?> = _notice
@@ -105,11 +119,23 @@ class HomeViewModel(
             _isRefreshing.value = true
             _lettersError.value = null
             _lettersErrorSessionExpired.value = false
-            // Device auth happens inside withAuth; the daily-login point is
-            // best effort and never blocks the letter flow.
+            // Device auth happens inside withAuth; the daily-login point
+            // is best effort and never blocks the letter flow. Its
+            // returned balance is NOT displayed (Bug 2): the only
+            // displayed balance is GET /points via refreshPoints()
+            // below, shared with the 我的 page.
             repository.dailyLogin()
-                .onSuccess { _points.value = it.points }
-                .onFailure { repository.getPoints().onSuccess { _points.value = it.points } }
+            // App-side fallback for due replies (Bug 1): the backend
+            // runs no scheduler, so without this trigger a due reply
+            // is never generated. Once per refresh, only for registered
+            // accounts (anonymous browsing has no letters), throttled
+            // to at most one call per minute across rapid tab switches,
+            // and fully silent on failure — it must never block the
+            // timeline or pop an error. Runs BEFORE refreshLetters so
+            // a reply generated here shows up in this same refresh.
+            // Never called from letter-detail screens.
+            triggerProcessDue()
+            repository.refreshPoints()
             repository.refreshCharacters().onFailure {
                 _notice.value = it.userNotice()
             }
@@ -128,8 +154,33 @@ class HomeViewModel(
         }
     }
 
+    /**
+     * Best-effort process-due trigger (Bug 1), called only from
+     * [refresh] — i.e. at most once per Home open / pull-to-refresh,
+     * never from letter-detail screens. Skipped for anonymous browsers
+     * (no letters to reply to) and throttled to one call per minute so
+     * rapid tab switching cannot spam the endpoint. All failures are
+     * swallowed: the backend scheduler (when it lands) is the real
+     * fix; this is only a fallback, and a failed trigger must never
+     * surface as an error or block the timeline.
+     */
+    private var lastProcessDueAtMs = 0L
+
+    private suspend fun triggerProcessDue() {
+        if (settings.accountEmail.first() == null) return
+        val now = System.currentTimeMillis()
+        if (now - lastProcessDueAtMs < PROCESS_DUE_MIN_INTERVAL_MS) return
+        lastProcessDueAtMs = now
+        runCatching { repository.processDue() }
+    }
+
     fun clearNotice() {
         _notice.value = null
+    }
+
+    companion object {
+        /** Min gap between App-side process-due triggers (see above). */
+        const val PROCESS_DUE_MIN_INTERVAL_MS = 60_000L
     }
 }
 
@@ -162,6 +213,7 @@ fun HomeScreen(
     val emailVerified by viewModel.emailVerified.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val points by viewModel.points.collectAsState()
+    val pointsError by viewModel.pointsError.collectAsState()
     val notice by viewModel.notice.collectAsState()
     val lettersError by viewModel.lettersError.collectAsState()
     val lettersErrorSessionExpired by viewModel.lettersErrorSessionExpired.collectAsState()
@@ -239,12 +291,26 @@ fun HomeScreen(
                     }
                 }
             }
-            points?.let {
+            // Points come from the shared GET /points balance (Bug 2):
+            // null means "not loaded yet", never 0. A failed refresh
+            // shows the load error instead of a fake number.
+            if (points != null) {
                 item {
                     Text(
-                        text = stringResource(R.string.home_points, it),
+                        text = stringResource(R.string.home_points, points!!),
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium
+                    )
+                }
+            } else if (pointsError != null) {
+                item {
+                    Text(
+                        text = stringResource(
+                            pointsError!!.resId,
+                            *pointsError!!.args.toTypedArray()
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

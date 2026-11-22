@@ -146,6 +146,7 @@
     <string name="me_membership_plan">免费 1 位笔友 · 每天 1 封信 · 首封当天回，之后每 3 天回信</string>
     <string name="me_points">积分</string>
     <string name="me_points_current">当前积分：%1$d</string>
+    <string name="me_points_loading">积分加载中…</string>
     <string name="me_points_hint">写信 +1 · 读完回信 +1 · 每日登录 +1；100 分解锁 1 位笔友，300 分再解锁 1 位</string>
     <string name="me_unlocks">解锁进度</string>
     <string name="me_unlocks_line">已解锁 %1$d 位（%2$s）</string>

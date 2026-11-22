@@ -121,6 +121,19 @@ def admin_dashboard(request: Request):
     return database.dashboard_stats()
 
 
+@router.get("/scheduler-runs")
+def admin_scheduler_runs(request: Request, limit: int = 20):
+    """Recent automatic reply-scheduler passes (counts only — no
+    device ids, no letter text). Lets an operator see whether due
+    replies are being generated, queued for want of an LLM key, or
+    failing, without looking at any single user's data."""
+    require_admin(request)
+    return {
+        "summary": database.scheduler_summary(),
+        "runs": database.list_scheduler_runs(limit=max(1, min(limit, 100))),
+    }
+
+
 SETTABLE_KEYS = set(database.DEFAULT_SETTINGS) - {"admin.password_hash", "auth.jwt_secret"}
 
 

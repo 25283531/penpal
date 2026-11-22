@@ -528,7 +528,8 @@ def test_admin_auth_and_never_returns_user_text():
     assert r.status_code == 200
     body = r.json()
     assert set(body) == {"devices", "letters", "user_letters", "replies",
-                         "active_relationships", "dau_today", "characters", "violations"}
+                         "active_relationships", "dau_today", "characters", "violations",
+                         "scheduler"}
     # user text never leaks through any admin endpoint
     tok = _new_device("privacy-device-001")
     marker = "PRIVACY-LETTER-88bb-信件原文"

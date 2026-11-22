@@ -146,6 +146,7 @@
     <string name="me_membership_plan">Free: 1 pen pal · 1 letter a day · first reply same day, then every 3 days</string>
     <string name="me_points">Points</string>
     <string name="me_points_current">Current points: %1$d</string>
+    <string name="me_points_loading">Loading points…</string>
     <string name="me_points_hint">Write +1 · Finish a reply +1 · Daily sign-in +1; 100 points unlocks 1 pen pal, 300 unlocks another</string>
     <string name="me_unlocks">Unlock progress</string>
     <string name="me_unlocks_line">Unlocked %1$d (%2$s)</string>

@@ -40,6 +40,16 @@ FastAPI + SQLite，单容器部署。给 Android App 用：选人物 → 写长�
   仍不合格返回 502；没有配任何 LLM Key 时信件保持排队状态，
   `POST /api/v1/letters/process-due` 返回 `llm_unavailable: true`，
   绝不伪造回信。
+- 回信是自动的，不靠手动触发：`app/scheduler.py` 在后端进程内起
+  一个守护线程（FastAPI lifespan 启动），启动时先跑一次（清掉已
+  到期的积压信），之后每小时跑一次，对所有 device 的到期信件执行
+  process-due（`app/replies.py: process_all_due_replies`）。没配 LLM
+  时信件继续排队、下次重试；LLM 失败的信件留在在途状态、下次重
+  试，不丢信。每次运行记日志并写入 `scheduler_runs` 表（只有汇总
+  计数），见 `/api/v1/admin/scheduler-runs` 与 dashboard 的
+  `scheduler` 一项；间隔可用环境变量 `PENPAL_REPLY_INTERVAL_SECONDS`
+  覆盖（默认 3600）。手动 `POST /api/v1/letters/process-due` 仍保留，
+  只处理调用者自己的到期信件。
 - 关系是知己：内容过滤禁止任何恋人/伴侣/配偶表述；回信标注
   `ai_generated: true`，App 展示时须写“AI 生成”。
 - 结束关系：30 天内可重连，超 30 天用户侧不可见；服务端加密数据

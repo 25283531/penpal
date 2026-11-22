@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
-from . import admin, database, email_auth, evolution
+from . import admin, database, email_auth, evolution, scheduler
 from .auth import get_current_device, issue_token, verify_token
 from .characters import BY_ID, PHOTO_FILES, public_character
 from .content_filter import validate_user_letter
@@ -58,7 +58,15 @@ from .replies import process_due_replies
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     database.init_db()
-    yield
+    # Reply scheduler (Bug 1 fix): in-process daemon thread, first pass
+    # immediately (clears the backlog of already-due letters), then
+    # hourly. Stopped on shutdown; a pass never blocks startup — the
+    # first pass runs in the thread, not here.
+    scheduler.start_scheduler()
+    try:
+        yield
+    finally:
+        scheduler.stop_scheduler()
 
 
 app = FastAPI(title="笔友 Penpal API", version="0.1.0", lifespan=lifespan)
@@ -278,6 +286,7 @@ def health():
         "port": 7000,
         "phase1_free": PHASE1_FREE,
         "providers_configured": providers,
+        "reply_scheduler": scheduler.scheduler_status(),
     }
 
 

@@ -55,7 +55,6 @@ import com.junze.penpal.R
 import com.junze.penpal.data.api.ActivityDto
 import com.junze.penpal.data.api.MembershipStatusDto
 import com.junze.penpal.data.api.MessageDto
-import com.junze.penpal.data.api.PointsDto
 import com.junze.penpal.data.api.UnlocksDto
 import com.junze.penpal.data.prefs.SettingsStore
 import com.junze.penpal.data.repository.PenpalRepository
@@ -66,6 +65,7 @@ import com.junze.penpal.ui.components.userNotice
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -92,8 +92,20 @@ class MeViewModel(
     private val _membership = MutableStateFlow<MembershipStatusDto?>(null)
     val membership: StateFlow<MembershipStatusDto?> = _membership
 
-    private val _points = MutableStateFlow<PointsDto?>(null)
-    val points: StateFlow<PointsDto?> = _points
+    /**
+     * Points: the ONE shared balance (Bug 2) — [PenpalRepository.pointsState],
+     * written only by GET /points, the same flow Home reads. Null means
+     * "not loaded yet", never 0: the UI shows loading / load-failed,
+     * never a fake 0 (the old code rendered a failed load as 0 via
+     * `points?.points ?: 0`). A failed refresh keeps the last good
+     * value and surfaces [pointsError].
+     */
+    val points: StateFlow<Int?> = repository.pointsState.points
+
+    /** Last points-refresh failure as a localised notice (null = none). */
+    val pointsError: StateFlow<Notice?> = repository.pointsState.error
+        .map { it?.userNotice() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private val _unlocks = MutableStateFlow<UnlocksDto?>(null)
     val unlocks: StateFlow<UnlocksDto?> = _unlocks
@@ -121,7 +133,7 @@ class MeViewModel(
         viewModelScope.launch {
             repository.getProfile()
             repository.getMembershipStatus().onSuccess { _membership.value = it }
-            repository.getPoints().onSuccess { _points.value = it }
+            repository.refreshPoints()
             repository.getUnlocks().onSuccess { _unlocks.value = it }
             repository.getMessages()
                 .onSuccess { _messages.value = it }
@@ -183,6 +195,7 @@ fun MeScreen(
 ) {
     val membership by viewModel.membership.collectAsState()
     val points by viewModel.points.collectAsState()
+    val pointsError by viewModel.pointsError.collectAsState()
     val unlocks by viewModel.unlocks.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val activities by viewModel.activities.collectAsState()
@@ -358,6 +371,11 @@ fun MeScreen(
             }
 
             // ---- Points / unlocks ----
+            // Bug 2: a failed load must NEVER render as 0. Null means
+            // "not loaded yet": show loading, or the load error with a
+            // retry, until GET /points succeeds. The value itself comes
+            // from the shared balance Home reads too, so the two pages
+            // always agree.
             item {
                 Card(
                     colors = CardDefaults.cardColors(
@@ -370,40 +388,61 @@ fun MeScreen(
                             style = MaterialTheme.typography.titleMedium
                         )
                         Spacer(modifier = Modifier.height(4.dp))
-                        val currentPoints = points?.points ?: 0
-                        Text(
-                            text = stringResource(R.string.me_points_current, currentPoints),
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        // Progress to the next points unlock (thresholds
-                        // from the server when available, else 100 / 300).
-                        val thresholds = unlocks?.thresholds?.get("points")
-                            ?.filter { it > 0 }?.sorted()?.takeIf { it.isNotEmpty() }
-                            ?: listOf(100, 300)
-                        val nextThreshold = thresholds.firstOrNull { it > currentPoints }
-                        LinearProgressIndicator(
-                            progress = if (nextThreshold != null) {
-                                currentPoints.toFloat() / nextThreshold
-                            } else {
-                                1f
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (nextThreshold != null) {
-                                stringResource(
-                                    R.string.me_points_next_unlock,
-                                    nextThreshold - currentPoints
-                                )
-                            } else {
-                                stringResource(R.string.me_points_all_unlocked)
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        val currentPoints = points
+                        if (currentPoints != null) {
+                            Text(
+                                text = stringResource(R.string.me_points_current, currentPoints),
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            // Progress to the next points unlock (thresholds
+                            // from the server when available, else 100 / 300).
+                            val thresholds = unlocks?.thresholds?.get("points")
+                                ?.filter { it > 0 }?.sorted()?.takeIf { it.isNotEmpty() }
+                                ?: listOf(100, 300)
+                            val nextThreshold = thresholds.firstOrNull { it > currentPoints }
+                            LinearProgressIndicator(
+                                progress = if (nextThreshold != null) {
+                                    currentPoints.toFloat() / nextThreshold
+                                } else {
+                                    1f
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (nextThreshold != null) {
+                                    stringResource(
+                                        R.string.me_points_next_unlock,
+                                        nextThreshold - currentPoints
+                                    )
+                                } else {
+                                    stringResource(R.string.me_points_all_unlocked)
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else if (pointsError != null) {
+                            Text(
+                                text = stringResource(
+                                    pointsError!!.resId,
+                                    *pointsError!!.args.toTypedArray()
+                                ),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(onClick = { viewModel.refresh() }) {
+                                Text(text = stringResource(R.string.action_retry))
+                            }
+                        } else {
+                            Text(
+                                text = stringResource(R.string.me_points_loading),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = stringResource(R.string.me_points_hint),
