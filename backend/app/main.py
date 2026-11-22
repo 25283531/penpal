@@ -8,9 +8,14 @@ per character (turn-taking); daily send cap per user per day (free/
 member 1, premium 5) — reaching the cap blocks further sends that day
 even to a different character.
 
-Anonymous device auth with an age gate (age is required at
-registration; under-14s are refused, 14–17s get minor_mode=1; full
-minor mode is M2). Phase 1 is FREE: everyone is on the free tier, no
+Anonymous device auth with an age gate. Email registration takes a
+birth date (strict YYYY-MM-DD) and refuses anyone under 18 on the
+day of registration (age_under_18); the birth date is encrypted at
+rest and never returned — APIs only ever expose an `is_adult` flag.
+Legacy clients that only send an `age` number keep the old behaviour
+(under-14s refused, 14–17s get minor_mode=1) so old apps do not
+break; already-registered accounts are never re-gated. Full minor
+mode is M2). Phase 1 is FREE: everyone is on the free tier, no
 payment is taken; tier checks are enforced anyway.
 
 Anonymous browsing is READ-ONLY: an anonymous device can look around
@@ -29,6 +34,7 @@ numbers, never user text. A reply is only 'replied' when the LLM
 actually generated and stored it — without an LLM key, letters stay
 queued (never a fake reply).
 """
+import logging
 import re
 import secrets
 from contextlib import asynccontextmanager
@@ -53,6 +59,8 @@ from .errors import (
 from .llm import list_llm_providers
 from .membership import PHASE1_FREE, delivery_stage, expected_reply_at, reply_due_date, tier_for
 from .replies import process_due_replies
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -123,6 +131,9 @@ def character_photo(character_id: str, filename: str):
 class DeviceAuthIn(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=128)
     age: int | None = Field(None, ge=1, le=120)
+    # New clients send birth_date (18+ gate, wins over age); legacy
+    # clients that only send age keep the old 14+ gate.
+    birth_date: str | None = None
     emergency_contact: str | None = Field(None, max_length=128)
 
 
@@ -145,6 +156,10 @@ class RegisterIn(BaseModel):
     email: str
     password: str = Field(..., min_length=1, max_length=128)
     age: int | None = Field(None, ge=1, le=120)
+    # Birth date (YYYY-MM-DD, required for new clients): the 18+
+    # gate is computed from it; `age` is kept only so legacy clients
+    # that cannot send a birth date keep working (old 14+ gate).
+    birth_date: str | None = None
     captcha_token: str | None = None
     captcha_text: str | None = None
     # Virtual-world name (required at registration): 1-20 chars,
@@ -290,12 +305,58 @@ def health():
     }
 
 
+def _resolve_registration_age(
+    birth_date: str | None, age: int | None,
+) -> tuple[int | None, str | None, str]:
+    """Resolve the effective age for a new registration.
+
+    Returns (age, birth_date_iso, age_source). When `birth_date` is
+    given it wins: strict YYYY-MM-DD, never a future date, and the
+    registrant must be 18+ on the day of registration (whole years —
+    the birthday must already have passed this year). Failures raise
+    ApiError with stable codes (invalid_birth_date /
+    birth_date_in_future / age_under_18). Legacy clients that only
+    send `age` return age_source="legacy_age" and keep the old
+    behaviour (the 14+ gate lives in get_or_create_device); the
+    response marks them so the old client is observable.
+    """
+    if birth_date is not None:
+        try:
+            born = database.parse_birth_date(birth_date)
+        except ValueError as e:
+            if "future" in str(e):
+                raise ApiError(
+                    400, "birth_date_in_future", "出生日期不能是未来日期",
+                ) from e
+            raise ApiError(
+                400, "invalid_birth_date",
+                "出生日期格式不正确，请使用 YYYY-MM-DD",
+            ) from e
+        effective_age = database.age_from_birth_date(born)
+        if effective_age < database.ADULT_AGE:
+            raise ApiError(
+                400, "age_under_18",
+                "不符合使用条件，必须年满 18 周岁才能使用本软件",
+            )
+        if effective_age > 120:
+            raise ApiError(
+                400, "invalid_birth_date",
+                "出生日期格式不正确，请使用 YYYY-MM-DD",
+            )
+        return effective_age, born.isoformat(), "birth_date"
+    return age, None, "legacy_age"
+
+
 @app.post("/api/v1/auth/device")
 def auth_device(body: DeviceAuthIn):
     device_id = body.device_id.strip()
+    effective_age, birth_date_iso, _source = _resolve_registration_age(
+        body.birth_date, body.age,
+    )
     try:
         device = database.get_or_create_device(
-            device_id, age=body.age, emergency_contact=body.emergency_contact,
+            device_id, age=effective_age, emergency_contact=body.emergency_contact,
+            birth_date=birth_date_iso,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -309,6 +370,10 @@ def auth_device(body: DeviceAuthIn):
         "plan": device["plan"],
         "minor_mode": bool(device["minor_mode"]),
         "age": device["age"],
+        # What the stored row actually carries (a pre-existing device
+        # keeps its old state — old accounts are never re-gated).
+        "is_adult": device.get("is_adult"),
+        "age_source": "birth_date" if device.get("has_birth_date") else "legacy_age",
     }
 
 
@@ -402,6 +467,13 @@ def auth_register(body: RegisterIn):
         raise ApiError(400, "invalid_email", "邮箱格式不正确")
     if len(body.password) < 8:
         raise ApiError(400, "password_too_short", "密码至少 8 位")
+    # Birth-date gate first, before the single-use captcha is spent:
+    # an under-18 / malformed / future birth date must not burn it.
+    effective_age, birth_date_iso, age_source = _resolve_registration_age(
+        body.birth_date, body.age,
+    )
+    if age_source == "legacy_age":
+        logger.info("register: legacy age-only client (no birth_date)")
     _require_captcha_or_400(body.captcha_token, body.captcha_text)
     if database.get_user_by_email(email):
         raise ApiError(400, "email_already_registered", "该邮箱已注册")
@@ -417,7 +489,9 @@ def auth_register(body: RegisterIn):
     # new data.
     device_id = "email-" + secrets.token_hex(12)
     try:
-        device = database.get_or_create_device(device_id, age=body.age)
+        device = database.get_or_create_device(
+            device_id, age=effective_age, birth_date=birth_date_iso,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     migrated = dict(database.ZERO_MERGE)
@@ -425,8 +499,10 @@ def auth_register(body: RegisterIn):
         migrated = database.merge_device_data(linked, device_id, retire_source=True)
     database.create_user(
         email, email_auth.hash_password(body.password),
-        body.age if body.age is not None else device.get("age"), device_id,
+        effective_age if effective_age is not None else device.get("age"),
+        device_id,
         display_name=display_name,
+        birth_date=birth_date_iso,
     )
     database.award_point(device_id, "login")
     return {
@@ -438,6 +514,10 @@ def auth_register(body: RegisterIn):
         "plan": device["plan"],
         "minor_mode": bool(device["minor_mode"]),
         "age": device["age"],
+        # The birth date itself is never returned — at most the
+        # already-adult flag, plus which client path supplied the age.
+        "is_adult": device.get("is_adult"),
+        "age_source": "birth_date" if device.get("has_birth_date") else "legacy_age",
         "linked_anonymous_device": linked is not None,
         "migrated": migrated,
     }

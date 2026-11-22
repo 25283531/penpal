@@ -7,7 +7,10 @@ pair, so character A can never recall character B's letters.
 
 Tables:
 - devices: device_id + age (age gate) + minor_mode + plan (free/member/
-  premium) + emergency_contact (encrypted).
+  premium) + emergency_contact (encrypted) + birth_date (encrypted,
+  18+ gate for new registrations; NULL for legacy rows).
+- users: email accounts; birth_date likewise encrypted, NULL for
+  legacy accounts (old accounts are never re-gated).
 - characters: seeded P01–P05 from app/characters.py (fixed text).
 - relationships: one row per (device, character); status active/ended;
   ended_at + reconnect_until (+30 days). Ended rows stay user-visible
@@ -27,6 +30,7 @@ Tables:
 """
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -43,6 +47,7 @@ CREATE TABLE IF NOT EXISTS devices (
     minor_mode INTEGER NOT NULL DEFAULT 0,
     plan TEXT NOT NULL DEFAULT 'free',
     emergency_contact TEXT,
+    birth_date TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS characters (
@@ -187,6 +192,7 @@ CREATE TABLE IF NOT EXISTS users (
     email_verified INTEGER NOT NULL DEFAULT 0,
     verified_at TEXT,
     age INTEGER,
+    birth_date TEXT,
     device_id TEXT UNIQUE NOT NULL,
     display_name TEXT,
     created_at TEXT NOT NULL
@@ -347,6 +353,10 @@ def _migrate_columns() -> None:
         ],
         "users": [
             ("display_name", "TEXT"),
+            ("birth_date", "TEXT"),
+        ],
+        "devices": [
+            ("birth_date", "TEXT"),
         ],
     }
     with connect() as conn:
@@ -811,11 +821,63 @@ def delete_activity(act_id: str) -> bool:
 
 
 # ---- devices (age gate) ----
-# Age is collected at registration. Under-14s are refused (guardian
-# consent + full minor mode are M2); 14–17s are flagged minor_mode=1.
-# The gate lives here so no device row can exist without an age check.
+# Two paths, by design:
+# - birth_date (new clients): strict YYYY-MM-DD, never a future date,
+#   and the registrant must be 18+ on the day of registration. The
+#   birth date is Fernet-encrypted at rest (same level as
+#   emergency_contact) and is NEVER returned by any read path — callers
+#   only ever see `is_adult` / `has_birth_date`.
+# - age only (legacy clients that cannot send a birth date): the old
+#   behaviour is preserved — under-14s refused, 14–17s flagged
+#   minor_mode=1 — so old apps keep working. The birth-date gate is
+#   the authority for new registrations; the age number alone can
+#   never override it.
+# Old rows (birth_date NULL) are never re-gated: login / use of an
+# already-registered account is unaffected by the new gate.
 
 MIN_AGE = 14
+ADULT_AGE = 18
+
+_BIRTH_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_birth_date(value: object) -> date:
+    """Strict YYYY-MM-DD -> date. Raises ValueError (stable substrings,
+    mapped to codes in errors.py) for a bad format or a future date."""
+    if not isinstance(value, str) or not _BIRTH_DATE_RE.match(value):
+        raise ValueError("birth_date must be YYYY-MM-DD")
+    try:
+        born = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError("birth_date must be YYYY-MM-DD") from None
+    if born > date.today():
+        raise ValueError("birth_date must not be in the future")
+    return born
+
+
+def age_from_birth_date(born: date, on: date | None = None) -> int:
+    """Whole years of age on `on` (default today): the birthday must
+    have passed this year — not a plain year subtraction."""
+    today = on or date.today()
+    return today.year - born.year - (
+        (today.month, today.day) < (born.month, born.day)
+    )
+
+
+def _is_adult(age: int | None, encrypted_birth_date: str | None) -> bool | None:
+    """Already-adult flag for a stored row: from the (encrypted) birth
+    date when one was collected, else from the stored age number;
+    None only when neither is known."""
+    if encrypted_birth_date:
+        try:
+            born = date.fromisoformat(decrypt_or_keep(encrypted_birth_date))
+        except ValueError:
+            pass
+        else:
+            return age_from_birth_date(born) >= ADULT_AGE
+    if age is not None:
+        return age >= ADULT_AGE
+    return None
 
 
 def device_exists(device_id: str) -> bool:
@@ -829,7 +891,8 @@ def device_exists(device_id: str) -> bool:
 def get_device(device_id: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT device_id, age, minor_mode, plan, emergency_contact, created_at"
+            "SELECT device_id, age, minor_mode, plan, emergency_contact,"
+            " birth_date, created_at"
             " FROM devices WHERE device_id = ?",
             (device_id,),
         ).fetchone()
@@ -838,33 +901,57 @@ def get_device(device_id: str) -> dict | None:
     d = dict(row)
     if d.get("emergency_contact"):
         d["emergency_contact"] = decrypt_or_keep(d["emergency_contact"])
+    # Birth date is never exposed, not even decrypted: only the
+    # "already adult" flag and whether one was ever collected.
+    raw_birth_date = d.pop("birth_date", None)
+    d["has_birth_date"] = bool(raw_birth_date)
+    d["is_adult"] = _is_adult(d.get("age"), raw_birth_date)
     return d
 
 
 def get_or_create_device(
     device_id: str, age: int | None = None, emergency_contact: str | None = None,
+    birth_date: str | None = None,
 ) -> dict:
-    """Create a device row. `age` is required on first registration
-    (the age gate); later calls without age return the existing row."""
+    """Create a device row. On first registration either `birth_date`
+    (new clients: 18+ gate, age derived from it) or `age` (legacy
+    clients: old 14+ gate) is required; later calls without either
+    return the existing row untouched — old accounts are never
+    re-gated. When both are given, birth_date wins."""
     existing = get_device(device_id)
     if existing:
         return existing
-    if age is None:
-        raise ValueError("age is required at registration (age gate)")
-    if not isinstance(age, int) or not 1 <= age <= 120:
-        raise ValueError("age must be an integer between 1 and 120")
-    if age < MIN_AGE:
-        raise ValueError(
-            "users under 14 need a guardian's consent (minor mode is M2); registration refused"
-        )
-    minor_mode = 1 if age < 18 else 0
+    encrypted_birth_date: str | None = None
+    if birth_date is not None:
+        born = parse_birth_date(birth_date)
+        age = age_from_birth_date(born)
+        if age < ADULT_AGE:
+            raise ValueError(
+                "users under 18 need to be 18 or older; registration refused"
+            )
+        if not 1 <= age <= 120:
+            raise ValueError("age must be an integer between 1 and 120")
+        minor_mode = 0
+        encrypted_birth_date = encrypt_text(born.isoformat())
+    else:
+        if age is None:
+            raise ValueError("age is required at registration (age gate)")
+        if not isinstance(age, int) or not 1 <= age <= 120:
+            raise ValueError("age must be an integer between 1 and 120")
+        if age < MIN_AGE:
+            raise ValueError(
+                "users under 14 need a guardian's consent (minor mode is M2); registration refused"
+            )
+        minor_mode = 1 if age < 18 else 0
     with connect() as conn:
         conn.execute(
-            "INSERT INTO devices (device_id, age, minor_mode, plan, emergency_contact, created_at)"
-            " VALUES (?, ?, ?, 'free', ?, ?)",
+            "INSERT INTO devices (device_id, age, minor_mode, plan, emergency_contact,"
+            " birth_date, created_at)"
+            " VALUES (?, ?, ?, 'free', ?, ?, ?)",
             (
                 device_id, age, minor_mode,
                 encrypt_text(emergency_contact) if emergency_contact else None,
+                encrypted_birth_date,
                 _today(),
             ),
         )
@@ -1789,12 +1876,19 @@ def dashboard_stats() -> dict:
 # ---- M1: email users / verification codes / captchas / rate limits ----
 
 def create_user(email: str, password_hash: str, age: int | None, device_id: str,
-                display_name: str | None = None) -> dict:
+                display_name: str | None = None,
+                birth_date: str | None = None) -> dict:
+    """Create an email account. `birth_date` (ISO YYYY-MM-DD, already
+    validated by the caller) is encrypted at rest, like
+    emergency_contact; legacy accounts pass None and keep NULL."""
     with connect() as conn:
         conn.execute(
             "INSERT INTO users (email, password_hash, email_verified, verified_at,"
-            " age, device_id, display_name, created_at) VALUES (?, ?, 0, NULL, ?, ?, ?, ?)",
-            (email, password_hash, age, device_id, display_name, _now_iso()),
+            " age, birth_date, device_id, display_name, created_at)"
+            " VALUES (?, ?, 0, NULL, ?, ?, ?, ?, ?)",
+            (email, password_hash, age,
+             encrypt_text(birth_date) if birth_date else None,
+             device_id, display_name, _now_iso()),
         )
     return get_user_by_email(email)
 
@@ -1803,20 +1897,33 @@ def get_user_by_email(email: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT email, password_hash, email_verified, verified_at, age,"
-            " device_id, display_name, created_at FROM users WHERE email = ?",
+            " birth_date, device_id, display_name, created_at FROM users WHERE email = ?",
             (email,),
         ).fetchone()
-    return dict(row) if row else None
+    return _public_user(row)
 
 
 def get_user_by_device(device_id: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT email, password_hash, email_verified, verified_at, age,"
-            " device_id, display_name, created_at FROM users WHERE device_id = ?",
+            " birth_date, device_id, display_name, created_at FROM users WHERE device_id = ?",
             (device_id,),
         ).fetchone()
-    return dict(row) if row else None
+    return _public_user(row)
+
+
+def _public_user(row: sqlite3.Row | None) -> dict | None:
+    """User row with the birth date stripped: only `is_adult` /
+    `has_birth_date` ever leave storage — the raw date is never
+    returned to any caller."""
+    if row is None:
+        return None
+    d = dict(row)
+    raw_birth_date = d.pop("birth_date", None)
+    d["has_birth_date"] = bool(raw_birth_date)
+    d["is_adult"] = _is_adult(d.get("age"), raw_birth_date)
+    return d
 
 
 def update_user_display_name(email: str, display_name: str) -> dict | None:
