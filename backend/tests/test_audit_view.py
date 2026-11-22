@@ -78,6 +78,11 @@ def test_privacy_text_covers_audit_points():
     assert "服务端仍加密留存，仅依法留存" in text
     assert "彻底删除" not in text
     assert "未成年人" in text and "2 小时" in text
+    # date of birth: collected only to check 18+, no real-name verification
+    assert "出生日期" in text and "年满 18 周岁" in text
+    assert "实名认证" in text
+    assert "出生日期加密保存，不会在任何界面原样展示" in text
+    assert "虚假年龄" in text and "承担法律责任" in text
     assert "AI 生成" in text and "2000" in text
     # App offline fallback text is the same text as the backend
     app_path = (
