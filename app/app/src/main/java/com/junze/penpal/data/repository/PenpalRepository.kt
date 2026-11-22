@@ -19,6 +19,7 @@ import com.junze.penpal.data.api.MembershipStatusDto
 import com.junze.penpal.data.api.MessageDto
 import com.junze.penpal.data.api.PointsDto
 import com.junze.penpal.data.api.PrivacyDto
+import com.junze.penpal.data.api.ProcessDueResponse
 import com.junze.penpal.data.api.ProfileDto
 import com.junze.penpal.data.api.ReadLetterResponse
 import com.junze.penpal.data.api.RegisterRequest
