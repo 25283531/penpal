@@ -65,6 +65,35 @@ def encrypt_text(plaintext: str) -> str:
     return get_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
 
 
+def key_fingerprint() -> str | None:
+    """SHA256 fingerprint (first 12 hex chars) of the key file, or None
+    when the file does not exist. This deliberately does NOT create the
+    key (unlike load_or_create_key) — a status check must never mint a
+    new key. Only the fingerprint is ever exposed; the key value itself
+    never leaves this module."""
+    import hashlib
+
+    path = key_path()
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+
+def key_status() -> dict:
+    """Key-file status for the /admin status page: whether the file
+    exists, its path, and its fingerprint (never the key value)."""
+    path = key_path()
+    return {
+        "exists": path.exists(),
+        "path": str(path),
+        "fingerprint_sha256_12": key_fingerprint(),
+        "backup_reminder": (
+            "密钥丢了，信件数据永久无法恢复。请把密钥文件单独备份，"
+            "不要和数据库放在同一处。"
+        ),
+    }
+
+
 def decrypt_text(token: str) -> str:
     """Decrypt a token. Raises InvalidToken for anything that is not a
     valid token produced by this key."""

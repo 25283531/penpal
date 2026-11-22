@@ -6,21 +6,25 @@ session token stored in the DB and sent as an HttpOnly cookie. All
 admin endpoints require a valid session.
 
 PRIVACY RED LINE: the admin console only ever sees AGGREGATE numbers —
-totals, letters per character, per-type violation counts. It never
-returns any single user's content (no letter text, no memory text, no
-device list, no export). Letter/memory contents exist only for the
-server to assemble LLM context in memory.
+totals, letters per character, per-type violation counts — EXCEPT for
+the audited letter-view path below (/letters … /view + /audit-log).
+That path is the single exception, and it is gated: a view needs a
+stated reason, decrypts in memory only, and writes one append-only
+audit row (time, operator, letter id, reason, result — never content)
+before the content is returned. If the audit write fails, the view is
+refused. There is no delete endpoint for the audit log.
 """
 import hashlib
 import hmac
 import secrets
 
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Request, Response
 
 from .errors import ApiError
 from pydantic import BaseModel, Field
 
-from . import database
+from . import crypto, database
 from .llm import PROVIDER_NAMES
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -132,6 +136,137 @@ def admin_scheduler_runs(request: Request, limit: int = 20):
         "summary": database.scheduler_summary(),
         "runs": database.list_scheduler_runs(limit=max(1, min(limit, 100))),
     }
+
+
+# ---------- audited letter view + audit log ----------
+
+# The only permitted reasons for viewing a letter's content. The
+# reason is mandatory: a view without one is refused (400) before any
+# decryption happens.
+AUDIT_REASONS = ("执法检查", "用户申诉", "故障排查", "其他")
+
+
+def _operator_label(session_token: str) -> str:
+    """Operator label for audit rows: a short digest of the admin
+    session token — enough to tell sessions apart, never the token."""
+    return "admin:" + hashlib.sha256(session_token.encode("utf-8")).hexdigest()[:12]
+
+
+class LetterViewIn(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=20)
+    note: str | None = Field(None, max_length=500)
+
+
+@router.get("/letters")
+def admin_list_letters(
+    request: Request, character_id: str | None = None,
+    direction: str | None = None, status: str | None = None,
+    device_digest: str | None = None, since: str | None = None,
+    until: str | None = None, limit: int = 100,
+):
+    """Metadata-only letter list (person, time, status, device digest).
+    Letter content is NEVER included here."""
+    require_admin(request)
+    if direction is not None and direction not in ("user", "ai"):
+        raise ApiError(400, "invalid_direction", "direction must be 'user' or 'ai'")
+    return database.list_letter_metadata(
+        character_id=character_id, direction=direction, status=status,
+        device_digest=device_digest, since=since, until=until, limit=limit,
+    )
+
+
+@router.get("/letters/{letter_id}")
+def admin_letter_metadata(letter_id: int, request: Request):
+    """Metadata for one letter (no content)."""
+    require_admin(request)
+    raw = database.get_letter_raw(letter_id)
+    if raw is None:
+        raise ApiError(404, "letter_not_found", "letter not found")
+    return {k: v for k, v in raw.items() if k != "text_encrypted"}
+
+
+@router.post("/letters/{letter_id}/view")
+def admin_view_letter(letter_id: int, body: LetterViewIn, request: Request):
+    """Decrypt and show one letter's content — audited, always.
+
+    Order of operations (deliberate):
+    1. reason is validated first (missing/invalid reason -> 400, no
+       decryption, no audit row for a view that never happened);
+    2. the letter is decrypted in memory;
+    3. the audit row is written BEFORE any content is returned — if
+       the audit write fails, the view is refused (503) and no content
+       is returned;
+    4. a decrypt failure is itself audited (result=decrypt_failed)
+       and returns an error, never partial content.
+    """
+    token = require_admin(request)
+    operator = _operator_label(token)
+    reason = (body.reason or "").strip()
+    if reason not in AUDIT_REASONS:
+        raise ApiError(
+            400, "audit_reason_required",
+            "查看信件必须填写查看原因（执法检查 / 用户申诉 / 故障排查 / 其他）",
+        )
+    note = (body.note or "").strip() or None
+    raw = database.get_letter_raw(letter_id)
+    if raw is None:
+        try:
+            database.record_audit_log(
+                operator, "letter_view_failed", letter_id, reason, "not_found", note,
+            )
+        except Exception:
+            pass  # a missing letter is a 404 either way
+        raise ApiError(404, "letter_not_found", "letter not found")
+    try:
+        text = crypto.decrypt_text(raw["text_encrypted"])
+        result = "ok"
+    except (InvalidToken, ValueError):
+        text = None
+        result = "decrypt_failed"
+    try:
+        audit = database.record_audit_log(
+            operator,
+            "letter_view" if result == "ok" else "letter_view_failed",
+            letter_id, reason, result, note,
+        )
+    except Exception as e:
+        raise ApiError(
+            503, "audit_log_failed",
+            "审计日志写入失败，本次查看已被拒绝",
+        ) from e
+    if text is None:
+        raise ApiError(
+            502, "letter_decrypt_failed",
+            "信件解密失败（密钥可能已更换或数据损坏），本次查看已记入审计日志",
+        )
+    meta = {k: v for k, v in raw.items() if k != "text_encrypted"}
+    return {**meta, "text": text, "audit_id": audit["id"]}
+
+
+@router.get("/audit-log")
+def admin_audit_log(
+    request: Request, letter_id: int | None = None,
+    since: str | None = None, until: str | None = None, limit: int = 100,
+):
+    """Append-only audit log (time, operator, action, letter id,
+    reason, result). Audit rows never contain letter content, and
+    there is intentionally NO delete endpoint for this log."""
+    require_admin(request)
+    return database.list_audit_logs(
+        letter_id=letter_id, since=since, until=until, limit=limit,
+    )
+
+
+@router.get("/key-status")
+def admin_key_status(request: Request):
+    """Decryption-key status: whether the key file exists, its path and
+    its SHA256 fingerprint (first 12 hex chars). The key value itself
+    is never returned. Deployment: DATA_DIR=/app/data, so the file is
+    /app/data/.encryption.key inside the container's data volume —
+    back it up separately from the database; losing it makes all
+    encrypted letters permanently unrecoverable."""
+    require_admin(request)
+    return crypto.key_status()
 
 
 SETTABLE_KEYS = set(database.DEFAULT_SETTINGS) - {"admin.password_hash", "auth.jwt_secret"}

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Decrypt-export tool (law-enforcement / inspection path ONLY).
 
-There is deliberately NO view/decrypt entry in the admin web UI. To inspect
-user content, an operator must have BOTH:
+Bulk export only. For viewing ONE letter, prefer the audited path:
+the /admin web console ("信件查看" tab, POST /api/v1/admin/letters/
+{id}/view) or `python -m app.audit_view` — both force a reason and
+write one row per view to the append-only admin_audit_log table.
+
+This bulk tool still needs BOTH:
   1. the database file, and
   2. the encryption key file (DATA_DIR/.encryption.key, mode 0600).
 

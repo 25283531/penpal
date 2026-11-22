@@ -64,14 +64,19 @@
     <button data-tab="messages">消息推送</button>
     <button data-tab="activities">活动管理</button>
     <button data-tab="memory">记忆演变</button>
+    <button data-tab="letters">信件查看（审计）</button>
+    <button data-tab="audit">审计日志</button>
   </nav>
   <main>
     <section id="tab-dashboard" class="active">
       <h2>仪表盘</h2>
-      <div class="privacy">隐私说明：后台只展示汇总数字，不查看任何单个用户的内容（信件、记忆原文均不展示）。第一阶段不收费，所有用户均为免费档。</div>
+      <div class="privacy">隐私说明：后台只展示汇总数字，不查看任何单个用户的内容（信件、记忆原文均不展示）。第一阶段不收费，所有用户均为免费档。例外：信件查看（审计）页可解密查看单封信件，但必须填写查看原因，每一次查看都会记入审计日志。</div>
       <div class="cards" id="stat-cards"></div>
       <h3>今日活跃（去重设备数）</h3>
       <div class="cards"><div class="card"><b id="stat-dau">–</b><span>今日活跃设备</span></div></div>
+      <h3>解密密钥状态</h3>
+      <div id="key-status"><p class="muted">加载中…</p></div>
+      <p class="hint">密钥文件丢了，信件数据永久无法恢复。请把密钥文件单独备份，不要和数据库放在同一处。页面上只显示指纹（SHA256 前 12 位），绝不显示密钥本身。</p>
     </section>
 
     <section id="tab-characters">
@@ -150,6 +155,52 @@
       <input type="number" id="set-memory.consolidation_interval_days" min="1" max="7">
       <button class="btn" data-save="memory">保存记忆设置</button>
     </section>
+
+    <section id="tab-letters">
+      <h2>信件查看（审计）</h2>
+      <div class="privacy">列表只显示元数据（人物、时间、状态、设备摘要），绝不显示信件内容。点开一封信查看内容前必须填写查看原因；每一次查看（包括解密失败的尝试）都会被强制记入审计日志，写日志失败则本次查看直接被拒绝。</div>
+      <h3>按元数据检索</h3>
+      <label>人物</label>
+      <select id="flt-character"><option value="">全部</option><option>P01</option><option>P02</option><option>P03</option><option>P04</option><option>P05</option></select>
+      <label>方向</label>
+      <select id="flt-direction"><option value="">全部</option><option value="user">用户来信</option><option value="ai">AI 回信</option></select>
+      <label>状态</label>
+      <input type="text" id="flt-status" placeholder="如 in_transit / replied / delivered，留空为全部">
+      <label>设备摘要</label>
+      <input type="text" id="flt-device" placeholder="12 位设备摘要，留空为全部">
+      <label>时间范围</label>
+      <input type="text" id="flt-since" placeholder="起始 YYYY-MM-DD，留空不限">
+      <input type="text" id="flt-until" placeholder="截止 YYYY-MM-DD，留空不限" style="margin-top:6px">
+      <button class="btn" id="letters-search-btn">检索</button>
+      <table><thead><tr><th>编号</th><th>人物</th><th>方向</th><th>状态</th><th>设备摘要</th><th>创建时间</th><th></th></tr></thead><tbody id="letters-body"></tbody></table>
+      <h3>查看一封信（需填原因）</h3>
+      <label>信件编号</label>
+      <input type="number" id="view-letter-id" min="1" placeholder="如 12">
+      <label>查看原因（必填）</label>
+      <select id="view-reason">
+        <option value="">— 请选择 —</option>
+        <option value="执法检查">执法检查</option>
+        <option value="用户申诉">用户申诉</option>
+        <option value="故障排查">故障排查</option>
+        <option value="其他">其他</option>
+      </select>
+      <label>备注（可选）</label>
+      <input type="text" id="view-note" maxlength="500" placeholder="补充说明，不要把信件内容写在这里">
+      <button class="btn" id="view-letter-btn">解密查看</button>
+      <pre id="letter-content" style="white-space:pre-wrap;background:#F2F0EB;border:1px solid #D8D2C4;border-radius:8px;padding:12px;margin-top:12px;display:none"></pre>
+    </section>
+
+    <section id="tab-audit">
+      <h2>审计日志</h2>
+      <div class="privacy">每一次信件查看都会在这里留一条记录：时间、操作人、动作、信件编号、查看原因、结果。日志里绝不出现信件内容。审计日志是只追加的，没有删除入口。</div>
+      <label>信件编号</label>
+      <input type="number" id="audit-letter-id" min="1" placeholder="留空为全部">
+      <label>时间范围</label>
+      <input type="text" id="audit-since" placeholder="起始 YYYY-MM-DD，留空不限">
+      <input type="text" id="audit-until" placeholder="截止 YYYY-MM-DD，留空不限" style="margin-top:6px">
+      <button class="btn" id="audit-search-btn">检索审计日志</button>
+      <table><thead><tr><th>编号</th><th>时间</th><th>操作人</th><th>动作</th><th>信件编号</th><th>原因</th><th>结果</th><th>备注</th></tr></thead><tbody id="audit-body"></tbody></table>
+    </section>
   </main>
 </div>
 <div id="msg"></div>
@@ -204,7 +255,54 @@ async function loadAll() {
   $("messages-list").innerHTML = msgs.map(m => `<div class="item"><b>${m.title}</b><div class="muted">${m.body}</div></div>`).join("") || `<p class="muted">暂无消息</p>`;
   const acts = await api("/api/v1/admin/activities");
   $("activities-list").innerHTML = acts.map(a => `<div class="item"><b>${a.title}</b><div class="muted">${a.body}</div></div>`).join("") || `<p class="muted">暂无活动</p>`;
+  const ks = await api("/api/v1/admin/key-status");
+  $("key-status").innerHTML = `<div class="cards">
+    <div class="card"><b>${ks.exists ? "存在" : "不存在"}</b><span>密钥文件</span></div>
+    <div class="card"><b style="font-size:16px">${ks.fingerprint_sha256_12 || "–"}</b><span>指纹（SHA256 前 12 位）</span></div>
+  </div><p class="muted" style="margin-top:8px">路径：${ks.path}</p><p class="muted">${ks.backup_reminder}</p>`;
+  await loadLetters();
+  await loadAudit();
 }
+async function loadLetters() {
+  const q = new URLSearchParams();
+  const ch = $("flt-character").value, dir = $("flt-direction").value, st = $("flt-status").value.trim(),
+        dev = $("flt-device").value.trim(), si = $("flt-since").value.trim(), un = $("flt-until").value.trim();
+  if (ch) q.set("character_id", ch);
+  if (dir) q.set("direction", dir);
+  if (st) q.set("status", st);
+  if (dev) q.set("device_digest", dev);
+  if (si) q.set("since", si);
+  if (un) q.set("until", un);
+  const rows = await api("/api/v1/admin/letters?" + q.toString());
+  $("letters-body").innerHTML = rows.map(r => `<tr><td>${r.id}</td><td>${r.character_id}</td><td>${r.direction}</td><td>${r.status}</td><td>${r.device_digest}</td><td>${r.created_at}</td><td><button class="btn secondary" style="margin-top:0;padding:4px 10px" data-view="${r.id}">查看</button></td></tr>`).join("") || `<tr><td colspan="7" class="muted">暂无信件</td></tr>`;
+  document.querySelectorAll("[data-view]").forEach(b => b.addEventListener("click", () => { $("view-letter-id").value = b.dataset.view; $("view-reason").focus(); }));
+}
+async function loadAudit() {
+  const q = new URLSearchParams();
+  const lid = $("audit-letter-id").value.trim(), si = $("audit-since").value.trim(), un = $("audit-until").value.trim();
+  if (lid) q.set("letter_id", lid);
+  if (si) q.set("since", si);
+  if (un) q.set("until", un);
+  const rows = await api("/api/v1/admin/audit-log?" + q.toString());
+  $("audit-body").innerHTML = rows.map(r => `<tr><td>${r.id}</td><td>${r.created_at}</td><td>${r.operator}</td><td>${r.action}</td><td>${r.letter_id ?? ""}</td><td>${r.reason}</td><td>${r.result}</td><td>${r.note ?? ""}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">暂无审计记录</td></tr>`;
+}
+$("letters-search-btn").addEventListener("click", async () => { try { await loadLetters(); } catch (e) { toast("检索失败：" + e.message); } });
+$("audit-search-btn").addEventListener("click", async () => { try { await loadAudit(); } catch (e) { toast("检索失败：" + e.message); } });
+$("view-letter-btn").addEventListener("click", async () => {
+  const id = $("view-letter-id").value.trim();
+  const reason = $("view-reason").value;
+  const note = $("view-note").value.trim();
+  const box = $("letter-content");
+  if (!id) { toast("请先填信件编号"); return; }
+  if (!reason) { toast("查看信件必须先选查看原因"); return; }
+  try {
+    const r = await api(`/api/v1/admin/letters/${id}/view`, { method: "POST", body: JSON.stringify({ reason, note: note || null }) });
+    box.style.display = "block";
+    box.textContent = `信件 #${r.id} · ${r.character_id} · ${r.direction} · ${r.created_at}（审计 #${r.audit_id}）\n\n${r.text}`;
+    toast("已查看，审计已记录");
+    await loadAudit();
+  } catch (e) { box.style.display = "none"; toast("查看失败：" + e.message); }
+});
 async function saveSettings(keys) {
   const vals = {};
   keys.forEach(([id, key, isBool]) => { const v = grab(id, key, isBool); if (v !== null) vals[key] = v; });

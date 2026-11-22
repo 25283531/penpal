@@ -25,6 +25,7 @@ Tables:
   admin console config and fetch-on-open content.
 - violation_stats: TYPE + COUNT per day only. Never text, never device.
 """
+import hashlib
 import json
 import secrets
 import sqlite3
@@ -239,6 +240,21 @@ CREATE TABLE IF NOT EXISTS email_send_failures (
 -- only — no device ids, no letter text, no letter ids. The admin
 -- dashboard reads these aggregates; a failed letter stays in_transit
 -- and is retried by the next pass, never silently dropped.
+-- Admin audit log (append-only): every audited view of a letter's
+-- decrypted content writes one row here (time, operator, action,
+-- letter id, reason, result). The log NEVER contains letter content,
+-- and there is intentionally NO delete function or delete endpoint
+-- for this table.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    action TEXT NOT NULL,
+    letter_id INTEGER,
+    reason TEXT NOT NULL,
+    note TEXT,
+    result TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS scheduler_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -523,6 +539,141 @@ def admin_session_valid(token: str) -> bool:
 def delete_admin_session(token: str) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+
+
+# ---- admin audit log (append-only) ----
+
+AUDIT_ACTIONS = {"letter_view", "letter_view_failed", "letter_export"}
+
+AUDIT_COLUMNS = "id, created_at, operator, action, letter_id, reason, note, result"
+
+
+def record_audit_log(
+    operator: str, action: str, letter_id: int | None, reason: str,
+    result: str, note: str | None = None,
+) -> dict:
+    """Append one audit row. Raises on failure — callers treat a failed
+    audit write as a refusal of the view itself (never view without a
+    log row). The log never stores letter content: `reason`/`note` are
+    operator-supplied metadata only, and callers must not copy letter
+    text into them."""
+    if action not in AUDIT_ACTIONS:
+        raise ValueError(f"unknown audit action: {action}")
+    now = _now_iso()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO admin_audit_log (created_at, operator, action,"
+            " letter_id, reason, note, result) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (now, operator, action, letter_id, reason, note, result),
+        )
+        row_id = cur.lastrowid
+    return get_audit_log(row_id)
+
+
+def get_audit_log(row_id: int) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {AUDIT_COLUMNS} FROM admin_audit_log WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_audit_logs(
+    letter_id: int | None = None, since: str | None = None,
+    until: str | None = None, limit: int = 100,
+) -> list[dict]:
+    """Audit rows, newest first. Filterable by letter id and time range.
+    There is deliberately NO delete_audit_log function."""
+    q = f"SELECT {AUDIT_COLUMNS} FROM admin_audit_log WHERE 1 = 1"
+    params: list = []
+    if letter_id is not None:
+        q += " AND letter_id = ?"
+        params.append(letter_id)
+    if since:
+        q += " AND created_at >= ?"
+        params.append(since)
+    if until:
+        q += " AND created_at <= ?"
+        params.append(until)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(limit, 500)))
+    with connect() as conn:
+        rows = conn.execute(q, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---- letter metadata for the audited admin view ----
+
+def _device_digest(device_id: str) -> str:
+    """Short digest of a device id for admin lists — the full device id
+    is never shown in the admin console."""
+    return hashlib.sha256((device_id or "").encode("utf-8")).hexdigest()[:12]
+
+
+LETTER_META_COLUMNS = (
+    "id, device_id, character_id, direction, status, reply_due_at,"
+    " is_first, ai_generated, created_at, replied_at"
+)
+
+
+def _letter_meta(row: dict) -> dict:
+    d = dict(row)
+    d["device_digest"] = _device_digest(d.pop("device_id"))
+    d["is_first"] = bool(d.get("is_first"))
+    d["ai_generated"] = bool(d.get("ai_generated"))
+    return d
+
+
+def list_letter_metadata(
+    character_id: str | None = None, direction: str | None = None,
+    status: str | None = None, device_digest: str | None = None,
+    since: str | None = None, until: str | None = None, limit: int = 100,
+) -> list[dict]:
+    """Metadata-only letter list for the admin console. The `text`
+    column is never selected here, so letter content cannot leak
+    through this path even by accident."""
+    q = f"SELECT {LETTER_META_COLUMNS} FROM letters WHERE 1 = 1"
+    params: list = []
+    if character_id:
+        q += " AND character_id = ?"
+        params.append(character_id)
+    if direction:
+        q += " AND direction = ?"
+        params.append(direction)
+    if status:
+        q += " AND status = ?"
+        params.append(status)
+    if since:
+        q += " AND created_at >= ?"
+        params.append(since)
+    if until:
+        q += " AND created_at <= ?"
+        params.append(until)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(limit, 500)))
+    with connect() as conn:
+        rows = conn.execute(q, params).fetchall()
+    out = [_letter_meta(dict(r)) for r in rows]
+    if device_digest:
+        out = [d for d in out if d["device_digest"] == device_digest]
+    return out
+
+
+def get_letter_raw(letter_id: int) -> dict | None:
+    """One letter row WITH its encrypted `text` token (still encrypted
+    — callers decrypt in memory only after writing the audit row).
+    Returns the metadata dict plus `text_encrypted`; never plaintext."""
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {LETTER_META_COLUMNS}, text FROM letters WHERE id = ?",
+            (letter_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = _letter_meta(dict(row))
+    d["text_encrypted"] = row["text"]
+    return d
 
 
 # ---- seed messages / activities ----
