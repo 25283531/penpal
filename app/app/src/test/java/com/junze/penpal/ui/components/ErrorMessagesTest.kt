@@ -249,6 +249,24 @@ class ErrorMessagesTest {
         assertEquals(ErrorMapping(ErrorKey.AGE_UNDER_18), e.errorMapping())
     }
 
+    @Test
+    fun invalidBirthDate_400_byCode() {
+        val e = httpError(
+            400,
+            """{"detail":"invalid birth date","code":"invalid_birth_date"}"""
+        )
+        assertEquals(ErrorMapping(ErrorKey.BIRTH_DATE_INVALID), e.errorMapping())
+    }
+
+    @Test
+    fun birthDateInFuture_400_byCode() {
+        val e = httpError(
+            400,
+            """{"detail":"birth date cannot be in the future","code":"birth_date_in_future"}"""
+        )
+        assertEquals(ErrorMapping(ErrorKey.BIRTH_DATE_FUTURE), e.errorMapping())
+    }
+
     // ---- Anonymous write gate (403 anonymous_letter_forbidden) ----
 
     @Test

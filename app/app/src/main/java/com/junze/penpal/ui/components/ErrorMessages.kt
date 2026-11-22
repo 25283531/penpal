@@ -71,6 +71,8 @@ enum class ErrorKey {
     SELF_REFERRAL,
     AGE_INVALID,
     AGE_UNDER_18,
+    BIRTH_DATE_INVALID,
+    BIRTH_DATE_FUTURE,
     VALIDATION_ERROR,
     BAD_REQUEST,
     FORBIDDEN,
@@ -124,6 +126,8 @@ fun ErrorKey.resId(): Int = when (this) {
     ErrorKey.SELF_REFERRAL -> R.string.err_self_referral
     ErrorKey.AGE_INVALID -> R.string.err_age_invalid
     ErrorKey.AGE_UNDER_18 -> R.string.err_age_under_18
+    ErrorKey.BIRTH_DATE_INVALID -> R.string.err_birth_date_invalid
+    ErrorKey.BIRTH_DATE_FUTURE -> R.string.err_birth_date_future
     ErrorKey.VALIDATION_ERROR -> R.string.err_validation_error
     ErrorKey.BAD_REQUEST -> R.string.err_bad_request
     ErrorKey.FORBIDDEN -> R.string.err_forbidden
@@ -177,6 +181,8 @@ private fun keyForCode(code: String): ErrorKey? = when (code) {
     "self_referral" -> ErrorKey.SELF_REFERRAL
     "age_required", "age_invalid", "underage_refused" -> ErrorKey.AGE_INVALID
     "age_under_18", "under_18" -> ErrorKey.AGE_UNDER_18
+    "invalid_birth_date" -> ErrorKey.BIRTH_DATE_INVALID
+    "birth_date_in_future" -> ErrorKey.BIRTH_DATE_FUTURE
     "validation_error" -> ErrorKey.VALIDATION_ERROR
     "bad_request" -> ErrorKey.BAD_REQUEST
     "unauthorized" -> ErrorKey.SESSION_EXPIRED
