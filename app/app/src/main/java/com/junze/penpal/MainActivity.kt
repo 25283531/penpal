@@ -56,6 +56,7 @@ import com.junze.penpal.ui.me.MeScreen
 import com.junze.penpal.ui.me.MeViewModel
 import com.junze.penpal.ui.privacy.PrivacyScreen
 import com.junze.penpal.ui.privacy.PrivacyViewModel
+import com.junze.penpal.ui.components.Notice
 import com.junze.penpal.ui.nav.Routes
 import com.junze.penpal.ui.theme.PenpalTheme
 import androidx.lifecycle.lifecycleScope
@@ -306,7 +307,14 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
                     onPrivacyClick = { navController.navigate(Routes.PRIVACY) },
                     onGoWrite = { goTab(Routes.CHARACTERS) },
                     onGoHome = { goTab(Routes.HOME) },
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    // Login success goes home (not the verify /
+                    // change-password form) and the "Signed in" toast
+                    // is shown on Home, where the user can see it.
+                    onLoginSuccess = {
+                        homeViewModel.showNotice(Notice(R.string.account_login_success))
+                        goTab(Routes.HOME)
+                    }
                 )
             }
             composable(Routes.PRIVACY) {

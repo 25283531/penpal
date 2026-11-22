@@ -178,6 +178,15 @@ class HomeViewModel(
         _notice.value = null
     }
 
+    /**
+     * One-off notice to show on Home (e.g. "Signed in" after a login
+     * that navigates away from the Account screen). Home's snackbar
+     * consumes and clears it, so it never repeats on a later visit.
+     */
+    fun showNotice(notice: Notice) {
+        _notice.value = notice
+    }
+
     companion object {
         /** Min gap between App-side process-due triggers (see above). */
         const val PROCESS_DUE_MIN_INTERVAL_MS = 60_000L

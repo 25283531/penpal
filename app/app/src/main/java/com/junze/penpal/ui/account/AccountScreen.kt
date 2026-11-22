@@ -46,7 +46,9 @@ import com.junze.penpal.data.repository.PenpalRepository
 import com.junze.penpal.ui.components.Notice
 import com.junze.penpal.ui.components.isValidDisplayName
 import com.junze.penpal.ui.components.userNotice
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -96,6 +98,18 @@ class AccountViewModel(
     private val _justRegistered = MutableStateFlow(false)
     val justRegistered: StateFlow<Boolean> = _justRegistered
 
+    /**
+     * One-shot login-success event (LOGIN mode only). The screen consumes
+     * it once and navigates home; a SharedFlow with no replay means a
+     * rotation / recomposition can never re-fire the navigation. The
+     * "Signed in" toast itself is shown on Home (see MainActivity),
+     * because this screen leaves the composition on navigation.
+     * Registration deliberately does NOT emit this — it keeps its own
+     * success page with the "write first / verify later" exits.
+     */
+    private val _loginSuccess = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val loginSuccess: SharedFlow<Unit> = _loginSuccess
+
     fun dismissRegisterSuccess() {
         _justRegistered.value = false
     }
@@ -118,7 +132,7 @@ class AccountViewModel(
         viewModelScope.launch {
             _busy.value = true
             repository.loginEmail(email.trim(), password)
-                .onSuccess { _notice.value = Notice(R.string.account_login_success) }
+                .onSuccess { _loginSuccess.tryEmit(Unit) }
                 .onFailure { _notice.value = it.userNotice() }
             _busy.value = false
         }
@@ -232,7 +246,8 @@ fun AccountScreen(
     onPrivacyClick: () -> Unit,
     onGoWrite: () -> Unit,
     onGoHome: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onLoginSuccess: () -> Unit = {}
 ) {
     val accountEmail by viewModel.accountEmail.collectAsState()
     val emailVerified by viewModel.emailVerified.collectAsState()
@@ -242,6 +257,15 @@ fun AccountScreen(
     val captcha by viewModel.captcha.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val notice by viewModel.notice.collectAsState()
+
+    // Login success navigates home exactly once: without this, a
+    // successful login just flips accountEmail to non-null and this
+    // screen re-renders in place as the verify / change-password form,
+    // which reads as "I was thrown onto the verify page". Registration
+    // does not come through here — it keeps its own success page.
+    LaunchedEffect(Unit) {
+        viewModel.loginSuccess.collect { onLoginSuccess() }
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
