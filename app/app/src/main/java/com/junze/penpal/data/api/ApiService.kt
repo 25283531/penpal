@@ -68,7 +68,12 @@ data class CaptchaResult(
 data class RegisterRequest(
     val email: String,
     val password: String,
-    val age: Int,
+    /**
+     * Date of birth, YYYY-MM-DD (required). The backend refuses under-18s
+     * with 400 + code `age_under_18`. Serialised as `birth_date` by the
+     * LOWER_CASE_WITH_UNDERSCORES policy in ApiClient.
+     */
+    val birthDate: String,
     val captchaToken: String,
     val captchaText: String,
     /** Virtual-world name (required): 1-20 chars, Chinese / letters / digits. */

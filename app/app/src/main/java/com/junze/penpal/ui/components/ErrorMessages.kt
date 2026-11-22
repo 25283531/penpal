@@ -70,6 +70,7 @@ enum class ErrorKey {
     INVALID_DATE,
     SELF_REFERRAL,
     AGE_INVALID,
+    AGE_UNDER_18,
     VALIDATION_ERROR,
     BAD_REQUEST,
     FORBIDDEN,
@@ -122,6 +123,7 @@ fun ErrorKey.resId(): Int = when (this) {
     ErrorKey.INVALID_DATE -> R.string.err_invalid_date
     ErrorKey.SELF_REFERRAL -> R.string.err_self_referral
     ErrorKey.AGE_INVALID -> R.string.err_age_invalid
+    ErrorKey.AGE_UNDER_18 -> R.string.err_age_under_18
     ErrorKey.VALIDATION_ERROR -> R.string.err_validation_error
     ErrorKey.BAD_REQUEST -> R.string.err_bad_request
     ErrorKey.FORBIDDEN -> R.string.err_forbidden
@@ -174,6 +176,7 @@ private fun keyForCode(code: String): ErrorKey? = when (code) {
     "invalid_date" -> ErrorKey.INVALID_DATE
     "self_referral" -> ErrorKey.SELF_REFERRAL
     "age_required", "age_invalid", "underage_refused" -> ErrorKey.AGE_INVALID
+    "age_under_18", "under_18" -> ErrorKey.AGE_UNDER_18
     "validation_error" -> ErrorKey.VALIDATION_ERROR
     "bad_request" -> ErrorKey.BAD_REQUEST
     "unauthorized" -> ErrorKey.SESSION_EXPIRED
@@ -206,7 +209,12 @@ private val DETAIL_RULES: List<Pair<String, ErrorKey>> = listOf(
     "missing bearer token" to ErrorKey.SESSION_EXPIRED,
     "age is required" to ErrorKey.AGE_INVALID,
     "age must be" to ErrorKey.AGE_INVALID,
-    "users under 14" to ErrorKey.AGE_INVALID,
+    // Under-18 refusal (400 age_under_18): the registration age gate is
+    // 18+, not 14 — the old "users under 14" wording is retired with it.
+    "under 18" to ErrorKey.AGE_UNDER_18,
+    "must be 18" to ErrorKey.AGE_UNDER_18,
+    "未满 18" to ErrorKey.AGE_UNDER_18,
+    "年满 18" to ErrorKey.AGE_UNDER_18,
     "cannot refer yourself" to ErrorKey.SELF_REFERRAL,
     "relationship not found" to ErrorKey.NOT_FOUND,
     "character not found" to ErrorKey.NOT_FOUND,
