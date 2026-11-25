@@ -223,13 +223,14 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
             }
             composable(Routes.CHARACTERS) {
                 val vm: CharactersViewModel = viewModel(
-                    factory = vmFactory { CharactersViewModel(app.repository) }
+                    factory = vmFactory { CharactersViewModel(app.repository, app.settings) }
                 )
                 CharactersScreen(
                     viewModel = vm,
                     onCharacterClick = { id ->
                         navController.navigate(Routes.characterDetail(id))
-                    }
+                    },
+                    onLoginClick = { navController.navigate(Routes.ACCOUNT) }
                 )
             }
             composable(
@@ -239,7 +240,7 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
                 val characterId = backStackEntry.arguments?.getString("characterId")
                     ?: return@composable
                 val vm: CharactersViewModel = viewModel(
-                    factory = vmFactory { CharactersViewModel(app.repository) }
+                    factory = vmFactory { CharactersViewModel(app.repository, app.settings) }
                 )
                 CharacterDetailScreen(
                     characterId = characterId,

@@ -35,7 +35,9 @@ import com.junze.penpal.data.local.AppDatabase
 import com.junze.penpal.data.local.CharacterEntity
 import com.junze.penpal.data.local.LetterEntity
 import com.junze.penpal.data.prefs.SettingsStore
+import com.junze.penpal.ui.components.DeviceAuthException
 import com.junze.penpal.ui.components.SessionExpiredException
+import com.junze.penpal.ui.components.isAgeGateFailure
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -106,13 +108,23 @@ class PenpalRepository(
     /**
      * First-launch device registration. Works before any email registration,
      * so browsing is usable anonymously. Never called once an email account
-     * exists (see isAnonymousRetired).
+     * exists (see isAnonymousRetired). Anonymous auth has no age gate:
+     * if an old server still answers it with an age error (400
+     * age_required / age_under_18), that failure is converted to a
+     * generic [DeviceAuthException] — age wording must never surface
+     * for a browse-only identity. Other failures pass through
+     * unchanged (a connection failure stays "server unreachable").
      */
     private suspend fun authenticate(): String {
         val deviceId = settings.getOrCreateDeviceId()
-        val response = apiClient.service().authDevice(DeviceAuthRequest(deviceId))
-        settings.saveToken(response.token)
-        return response.token
+        try {
+            val response = apiClient.service().authDevice(DeviceAuthRequest(deviceId))
+            settings.saveToken(response.token)
+            return response.token
+        } catch (e: HttpException) {
+            if (e.isAgeGateFailure()) throw DeviceAuthException()
+            throw e
+        }
     }
 
     /**

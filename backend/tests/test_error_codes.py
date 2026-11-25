@@ -44,6 +44,8 @@ def _registered(email: str) -> tuple[str, str]:
     token, code, _png = email_auth.create_captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": email, "password": "password123", "age": 30,
+        # Registration requires a birth date (18+ gate).
+        "birth_date": "1996-06-15",
         "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
@@ -134,13 +136,14 @@ def test_auth_codes():
     r = client.get("/api/v1/characters", headers=_auth("bogus.token.here"))
     assert r.status_code == 401, r.text
     assert r.json()["code"] == "invalid_token"
-    # age gate goes through the ValueError -> HTTPException path, so
-    # the code comes from inference, not an explicit raise site.
+    # Anonymous device auth has no age gate: no age at all, or an
+    # under-14 age, both succeed with 200 and no age error code.
     r = client.post("/api/v1/auth/device", json={"device_id": "err-age-001"})
-    assert r.status_code == 400 and r.json()["code"] == "age_required"
+    assert r.status_code == 200, r.text
+    assert r.json()["age"] is None
     r = client.post("/api/v1/auth/device", json={"device_id": "err-age-002", "age": 13})
-    assert r.status_code == 400 and r.json()["code"] == "underage_refused"
-    assert "14" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    assert r.json()["minor_mode"] is True
 
 
 def test_email_auth_codes():

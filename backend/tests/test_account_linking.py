@@ -59,6 +59,8 @@ def _register(email: str, display_name: str = "阿辉", device_id: str | None = 
     token, code = _captcha()
     body: dict = {
         "email": email, "password": password, "age": 30,
+        # Registration requires a birth date (18+ gate).
+        "birth_date": "1996-06-15",
         "display_name": display_name,
         "captcha_token": token, "captcha_text": code,
     }

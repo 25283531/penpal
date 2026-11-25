@@ -34,7 +34,8 @@
 
     <string name="characters_title">Pen Pals</string>
     <string name="characters_intro">Every pen pal is a fictional confidant, not a real person; replies are AI-generated.</string>
-    <string name="characters_empty">Couldn\'t load the list. Please check your network and retry.</string>
+    <string name="characters_empty">No pen pals yet.</string>
+    <string name="characters_cached_notice">Showing saved pen pals</string>
     <string name="character_ai_label">AI-generated · Fictional character</string>
     <string name="character_relationship">Confidant</string>
     <string name="character_write">Write to them</string>

@@ -53,6 +53,9 @@ def _registered(email: str) -> tuple[str, str]:
     token, code, _png = email_auth.create_captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": email, "password": "password123", "age": 30,
+        # Registration requires a birth date (18+ gate); the age
+        # number alone never registers. birth_date wins over age.
+        "birth_date": "1996-06-15",
         "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
@@ -99,14 +102,19 @@ def test_llm_providers_four_only_no_doubao():
 
 # ---------- auth / age gate ----------
 
-def test_auth_age_gate():
-    # age is required at registration
+def test_auth_device_no_age_gate():
+    # Anonymous browsing has no age gate: a fresh device with no age
+    # at all gets a token (age NULL, minor mode off) — first launch
+    # must never fail with an age error.
     r = client.post("/api/v1/auth/device", json={"device_id": "age-missing-001"})
-    assert r.status_code == 400, r.text
-    # under 14 refused
+    assert r.status_code == 200, r.text
+    assert r.json()["age"] is None
+    assert r.json()["minor_mode"] is False
+    assert r.json()["is_adult"] is None
+    # Supplied ages are stored, never refused — not even under 14.
     r = client.post("/api/v1/auth/device", json={"device_id": "age-13-001", "age": 13})
-    assert r.status_code == 400, r.text
-    assert "14" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    assert r.json()["minor_mode"] is True
     # 14-17: minor mode on
     r = client.post("/api/v1/auth/device", json={"device_id": "age-16-001", "age": 16})
     assert r.status_code == 200, r.text

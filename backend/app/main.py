@@ -8,15 +8,17 @@ per character (turn-taking); daily send cap per user per day (free/
 member 1, premium 5) — reaching the cap blocks further sends that day
 even to a different character.
 
-Anonymous device auth with an age gate. Email registration takes a
-birth date (strict YYYY-MM-DD) and refuses anyone under 18 on the
-day of registration (age_under_18); the birth date is encrypted at
-rest and never returned — APIs only ever expose an `is_adult` flag.
-Legacy clients that only send an `age` number keep the old behaviour
-(under-14s refused, 14–17s get minor_mode=1) so old apps do not
-break; already-registered accounts are never re-gated. Full minor
-mode is M2). Phase 1 is FREE: everyone is on the free tier, no
-payment is taken; tier checks are enforced anyway.
+Anonymous device auth has NO age gate: a fresh device always gets a
+token (age stored NULL when unknown), so first launch can always
+browse. Email registration takes a birth date (strict YYYY-MM-DD)
+and refuses anyone under 18 on the day of registration
+(age_under_18). The birth date is encrypted at rest and never
+returned — APIs only ever expose an `is_adult` flag. Legacy clients
+that only send an `age` number keep the old behaviour (under-14s
+refused, 14–17s get minor_mode=1) so old apps do not break;
+already-registered accounts are never re-gated. Full minor mode is
+M2). Phase 1 is FREE: everyone is on the free tier, no payment is
+taken; tier checks are enforced anyway.
 
 Anonymous browsing is READ-ONLY: an anonymous device can look around
 but cannot send letters (403 anonymous_letter_forbidden) and earns no
@@ -131,8 +133,9 @@ def character_photo(character_id: str, filename: str):
 class DeviceAuthIn(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=128)
     age: int | None = Field(None, ge=1, le=120)
-    # New clients send birth_date (18+ gate, wins over age); legacy
-    # clients that only send age keep the old 14+ gate.
+    # New clients send birth_date (18+ gate, wins over age); a
+    # supplied `age` is stored when usable but NEVER gates anonymous
+    # auth — the 18+ gate lives only on email registration.
     birth_date: str | None = None
     emergency_contact: str | None = Field(None, max_length=128)
 
@@ -350,13 +353,29 @@ def _resolve_registration_age(
 @app.post("/api/v1/auth/device")
 def auth_device(body: DeviceAuthIn):
     device_id = body.device_id.strip()
-    effective_age, birth_date_iso, _source = _resolve_registration_age(
-        body.birth_date, body.age,
-    )
+    # Anonymous browsing has NO age gate (the 18+ gate lives only on
+    # email registration): a fresh device with no age at all must
+    # always get a token, and a supplied age / birth date can never
+    # fail this call. A birth date sent by an old client is stored
+    # when usable (age derived, minor_mode set) and silently ignored
+    # when it is not (malformed, future, or out of range) — anonymous
+    # auth never returns an age error code in any case.
+    birth_date_iso: str | None = None
+    effective_age = body.age
+    if body.birth_date is not None:
+        try:
+            born = database.parse_birth_date(body.birth_date)
+        except ValueError:
+            born = None
+        if born is not None:
+            derived = database.age_from_birth_date(born)
+            if 1 <= derived <= 120:
+                birth_date_iso = born.isoformat()
+                effective_age = derived
     try:
         device = database.get_or_create_device(
             device_id, age=effective_age, emergency_contact=body.emergency_contact,
-            birth_date=birth_date_iso,
+            birth_date=birth_date_iso, allow_unknown_age=True,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
