@@ -359,7 +359,7 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
                                 )
                                 ViewModelProvider(
                                     entry,
-                                    vmFactory { CharactersViewModel(app.repository) }
+                                    vmFactory { CharactersViewModel(app.repository, app.settings) }
                                 )[CharactersViewModel::class.java]
                                     .showNotice(Notice(R.string.letter_sent))
                             }
