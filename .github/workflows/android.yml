@@ -41,7 +41,15 @@ jobs:
         working-directory: app
         run: gradle assembleDebug --stacktrace
 
+      # Run the local unit tests (incl. the navigation tests that prove
+      # the bottom-tab destinations). Previously CI only assembled the
+      # APK, so unit tests were never executed anywhere.
+      - name: Run unit tests
+        working-directory: app
+        run: gradle :app:testDebugUnitTest --stacktrace
+
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: penpal-debug-apk

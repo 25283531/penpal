@@ -80,4 +80,8 @@ dependencies {
 
     // Local unit tests (ErrorMessagesTest: backend error -> localised key)
     testImplementation(libs.junit)
+    // Navigation tests (GoTabTest): TestNavHostController + Robolectric
+    // run the real tab-navigation function on the JVM, no device needed.
+    testImplementation(libs.androidx.navigation.testing)
+    testImplementation(libs.robolectric)
 }

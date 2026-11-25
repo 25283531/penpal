@@ -31,6 +31,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -136,6 +137,31 @@ inline fun <reified T : ViewModel> vmFactory(crossinline create: () -> T) =
         override fun <T2 : ViewModel> create(modelClass: Class<T2>): T2 = create() as T2
     }
 
+/** Bottom-tab navigation, shared by the bottom bar and by screens that
+ * jump to a tab (AccountScreen's "go write / go home" exits, and the
+ * login-success jump home). Internal (not private) so the navigation
+ * unit test (GoTabTest) exercises this exact function instead of a
+ * copy: any drift between the tested logic and the shipped logic
+ * would make the test worthless.
+ *
+ * Behaviour: pop everything above the start destination (saving state),
+ * navigate single-top to the tab, and restore the tab's saved state.
+ * In particular, tapping "我" while on the account page (change
+ * password / verify email) must pop the account page off the stack:
+ * the back stack afterwards is [home, me], so neither tapping the tab
+ * nor pressing system-back from "我" can land the user back on the
+ * change-password page.
+ */
+internal fun navigateToTab(navController: NavController, route: String) {
+    navController.navigate(route) {
+        popUpTo(navController.graph.findStartDestination().id) {
+            saveState = true
+        }
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
 @Composable
 private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
     val navController = rememberNavController()
@@ -170,15 +196,7 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
         }
     }
 
-    val goTab: (String) -> Unit = { route ->
-        navController.navigate(route) {
-            popUpTo(navController.graph.findStartDestination().id) {
-                saveState = true
-            }
-            launchSingleTop = true
-            restoreState = true
-        }
-    }
+    val goTab: (String) -> Unit = { route -> navigateToTab(navController, route) }
 
     Scaffold(
         bottomBar = {
