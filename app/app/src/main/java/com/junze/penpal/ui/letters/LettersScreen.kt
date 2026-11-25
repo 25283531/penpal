@@ -914,6 +914,26 @@ class LetterDetailViewModel(
     fun clearNotice() {
         _notice.value = null
     }
+
+    /** The thread for one character (oldest first), for the reply gate:
+     * the server allows the next letter only when no user letter for
+     * this character is still in_transit (409 unanswered_letter). */
+    fun thread(characterId: String) = repository.lettersForCharacter(characterId)
+}
+
+/**
+ * Whether the "Reply" button on an AI letter's detail page may open the
+ * write screen. Mirrors the server's turn-taking rule exactly: one
+ * outstanding (in_transit) user letter per character blocks the next
+ * send (409 unanswered_letter). A reply still in transit is not
+ * reply-able either — it has not been delivered yet.
+ */
+fun canReplyToLetter(letter: LetterDto, thread: List<LetterDto>): Boolean {
+    if (letter.direction != "ai") return false
+    if (letter.status == "in_transit") return false
+    return thread
+        .filter { it.characterId == letter.characterId }
+        .none { it.direction == "user" && it.status == "in_transit" }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -921,10 +941,23 @@ class LetterDetailViewModel(
 fun LetterDetailScreen(
     viewModel: LetterDetailViewModel,
     onBack: () -> Unit,
-    onMarkedRead: () -> Unit = {}
+    onMarkedRead: () -> Unit = {},
+    /** Opens the write screen for this letter's character. */
+    onReplyClick: (String) -> Unit = {},
+    /** False = anonymous browsing: the reply entry is visibly disabled
+     * with a prompt + a register action (writing needs an email account). */
+    isRegistered: Boolean = true,
+    onRegisterClick: () -> Unit = {}
 ) {
     val letter by viewModel.letter.collectAsState()
     val notice by viewModel.notice.collectAsState()
+
+    // The character's thread, for the reply gate below. The flow only
+    // emits the cached thread once the letter itself is loaded, so the
+    // reply button waits until the thread actually contains this letter
+    // (threadLoaded) instead of deciding on an empty initial list.
+    val thread by viewModel.thread(letter?.characterId ?: "").collectAsState(initial = emptyList())
+    val threadLoaded = letter?.let { shown -> thread.any { it.id == shown.id } } ?: false
 
     val snackbarHostState = remember { SnackbarHostState() }
     val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
@@ -1079,6 +1112,59 @@ fun LetterDetailScreen(
                             stringResource(R.string.letter_read)
                         }
                     )
+                }
+                // ---- Reply: opens the write screen for this character.
+                // Only once the thread is loaded (never decide on the
+                // empty initial list), and only when the turn-taking
+                // rule allows a new letter — otherwise the button stays
+                // disabled with the reason, never a tap-then-error.
+                if (threadLoaded) {
+                    if (!isRegistered) {
+                        Button(
+                            onClick = {},
+                            enabled = false,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(text = stringResource(R.string.letter_reply))
+                        }
+                        Text(
+                            text = stringResource(R.string.err_email_required),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedButton(
+                            onClick = onRegisterClick,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(text = stringResource(R.string.account_login_register))
+                        }
+                    } else if (canReplyToLetter(current, thread)) {
+                        Button(
+                            onClick = { onReplyClick(current.characterId) },
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(text = stringResource(R.string.letter_reply))
+                        }
+                    } else {
+                        Button(
+                            onClick = {},
+                            enabled = false,
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(text = stringResource(R.string.letter_reply))
+                        }
+                        Text(
+                            text = stringResource(
+                                if (current.status == "in_transit") {
+                                    R.string.letter_reply_waiting
+                                } else {
+                                    R.string.err_unanswered_letter
+                                }
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
