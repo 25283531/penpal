@@ -13,7 +13,6 @@
     <string name="action_cancel">取消</string>
     <string name="action_confirm">确定</string>
     <string name="action_back">返回</string>
-    <string name="action_done">完成</string>
     <string name="action_refresh_desc">刷新</string>
     <string name="loading">加载中…</string>
     <string name="network_error">网络不可用，显示的是上次保存的内容</string>
@@ -74,9 +73,6 @@
     <string name="letter_reply_today">预计今天回信</string>
     <string name="letter_reply_expected">预计 %1$s 回信</string>
     <string name="letter_reply_expected_raw">预计回信：%1$s</string>
-    <string name="letter_sent_title">信已寄出</string>
-    <string name="letter_sent_rules">第一封信对方今天就会回；之后免费每 3 天回一封，会员每天回一封。这不是即时秒回，是慢信，请耐心等一等。</string>
-    <string name="letter_sent_reminder">回信到了会在首页时间线里出现，也会收到提醒。</string>
     <string name="letter_write_intro">第一封信对方今天就会回；之后免费每 3 天回一封，会员每天回一封。这不是即时秒回，是慢信。每天最多寄 1 封信。</string>
     <string name="letter_detail_rule">第一封当天回，之后免费每 3 天回一封、会员每天回一封；不是即时秒回，是慢信。</string>
 

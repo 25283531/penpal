@@ -100,6 +100,16 @@ class CharactersViewModel(
     val isLoading: StateFlow<Boolean> = _isLoading
 
     /**
+     * One-off notice for the thread screen (e.g. "letter sent" after a
+     * send that lands back on this character's thread). The thread
+     * screen's snackbar consumes and clears it, so it never repeats on
+     * a later visit. (Kept separate from the persistent characters-load
+     * error state below, which is a different channel.)
+     */
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice
+
+    /**
      * Last characters-load failure, kept (not just a transient
      * snackbar). While set, the screen shows the error with a retry
      * action — and keeps any cached characters visible. It must
@@ -146,6 +156,20 @@ class CharactersViewModel(
     suspend fun loadCharacter(characterId: String): CharacterDto? {
         refresh()
         return repository.getCharacter(characterId)
+    }
+
+    fun clearNotice() {
+        _notice.value = null
+    }
+
+    /**
+     * One-off notice for the thread screen (e.g. "letter sent" after a
+     * send that lands back on this character's thread). The thread
+     * screen's snackbar consumes and clears it, so it never repeats on
+     * a later visit.
+     */
+    fun showNotice(notice: Notice) {
+        _notice.value = notice
     }
 }
 
@@ -412,12 +436,23 @@ fun CharacterDetailScreen(
 ) {
     var character by remember { mutableStateOf<CharacterDto?>(null) }
     val thread by viewModel.thread(characterId).collectAsState(initial = emptyList())
+    val notice by viewModel.notice.collectAsState()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
+    LaunchedEffect(noticeText) {
+        noticeText?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearNotice()
+        }
+    }
 
     LaunchedEffect(characterId) {
         character = viewModel.loadCharacter(characterId)
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text(text = character?.name ?: stringResource(R.string.characters_title)) },
@@ -745,8 +780,10 @@ class WriteLetterViewModel(
     private val _notice = MutableStateFlow<Notice?>(null)
     val notice: StateFlow<Notice?> = _notice
 
-    /** The letter just sent (null until a send succeeds). The screen shows
-     * its backend-computed expected reply time instead of popping away. */
+    /** The letter just sent (null until a send succeeds). The write
+     * screen auto-returns to the timeline on this signal — the new
+     * letter is already in Room (sendLetter inserts it), so the
+     * timeline shows it with its backend-computed expected reply time. */
     private val _sentLetter = MutableStateFlow<LetterDto?>(null)
     val sentLetter: StateFlow<LetterDto?> = _sentLetter
 
@@ -795,6 +832,16 @@ fun WriteLetterScreen(
     val isSending by viewModel.isSending.collectAsState()
     val notice by viewModel.notice.collectAsState()
     val sentLetter by viewModel.sentLetter.collectAsState()
+
+    // Send success returns straight to the timeline: the old
+    // confirmation screen stranded users here (they read the standstill
+    // as "not sent"). The effect key only changes null -> letter, so
+    // recomposition or returning from background cannot fire onSent
+    // twice; the write screen's ViewModel dies with its back-stack
+    // entry, so a later visit starts from null again.
+    LaunchedEffect(sentLetter) {
+        if (sentLetter != null) onSent()
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
@@ -845,53 +892,6 @@ fun WriteLetterScreen(
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {
                     Text(text = stringResource(R.string.account_login_register))
-                }
-            }
-            return@Scaffold
-        }
-        val sent = sentLetter
-        if (sent != null) {
-            // ---- Sent: show the backend's expected reply time + the rules ----
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    text = stringResource(R.string.letter_sent_title),
-                    style = MaterialTheme.typography.headlineMedium
-                )
-                val expected = expectedReplyText(sent.expectedReplyAt, sent.replyDueAt)
-                if (expected.isNotBlank()) {
-                    Text(
-                        text = expected,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                sent.deliveryStageText?.takeIf { it.isNotBlank() }?.let { stage ->
-                    Text(
-                        text = stage,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Text(
-                    text = stringResource(R.string.letter_sent_rules),
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = stringResource(R.string.letter_sent_reminder),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Button(
-                    onClick = onSent,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                ) {
-                    Text(text = stringResource(R.string.action_done))
                 }
             }
             return@Scaffold

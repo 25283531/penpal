@@ -176,6 +176,28 @@ internal fun navigateToTab(navController: NavController, route: String) {
     }
 }
 
+/**
+ * Where "寄出" lands, from the back-stack routes (oldest first, WRITE
+ * on top). From a letter detail the write screen pops twice (write ->
+ * detail -> the screen under the detail); otherwise once. Returns the
+ * landing route, or null when the stack is too short to tell (the
+ * caller then pops once and shows no notice).
+ *
+ * Pure so the pop counts are unit-testable without a NavController:
+ * [HOME, LETTER_DETAIL, WRITE] + from-detail -> HOME (the reported
+ * bug's path); [.., CHARACTER_DETAIL, WRITE] -> CHARACTER_DETAIL
+ * (single pop, never back onto the letter detail); [..,
+ * CHARACTER_DETAIL, LETTER_DETAIL, WRITE] + from-detail ->
+ * CHARACTER_DETAIL (double pop lands on the thread, not Home).
+ */
+fun sendReturnLandingRoute(
+    stackRoutes: List<String?>,
+    cameFromLetterDetail: Boolean
+): String? {
+    val pops = if (cameFromLetterDetail) 2 else 1
+    return stackRoutes.getOrNull(stackRoutes.size - 1 - pops)
+}
+
 @Composable
 private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
     val navController = rememberNavController()
@@ -300,17 +322,48 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
                     viewModel = vm,
                     onSent = {
                         // Back to the timeline, where the new letter (with
-                        // its expected reply time) is visible. From the
-                        // character page one pop already lands on the
-                        // thread; from a letter detail page pop twice —
-                        // write -> letter detail -> the timeline under it
-                        // (character thread, or Home when the detail was
-                        // opened from there).
+                        // its expected reply time) is visible. The landing
+                        // screen is computed from the stack BEFORE popping
+                        // (see sendReturnLandingRoute): from a letter
+                        // detail page pop twice — write -> letter detail
+                        // -> the timeline under it (Home, or the
+                        // character thread when the detail was opened
+                        // from there); from the character page one pop
+                        // lands on the thread. The "sent" notice goes to
+                        // whichever screen the user lands on, through
+                        // that screen's own snackbar channel.
+                        // The previous-entry check reads the live stack at
+                        // call time, so it holds identically whether
+                        // onSent fires from the auto-return effect or
+                        // from a tap: no navigation happens between the
+                        // send landing and the call, so the stack is the
+                        // same in both cases.
+                        val stackRoutes = navController.currentBackStack.value
+                            .map { it.destination?.route }
                         val cameFromLetterDetail =
                             navController.previousBackStackEntry?.destination?.route ==
                                 Routes.LETTER_DETAIL
+                        val landing =
+                            sendReturnLandingRoute(stackRoutes, cameFromLetterDetail)
                         navController.popBackStack()
                         if (cameFromLetterDetail) navController.popBackStack()
+                        when (landing) {
+                            Routes.HOME -> homeViewModel.showNotice(
+                                Notice(R.string.letter_sent)
+                            )
+                            Routes.CHARACTER_DETAIL -> {
+                                // Same entry-scoped ViewModel instance the
+                                // thread screen itself observes.
+                                val entry = navController.getBackStackEntry(
+                                    Routes.CHARACTER_DETAIL
+                                )
+                                ViewModelProvider(
+                                    entry,
+                                    vmFactory { CharactersViewModel(app.repository, app.settings) }
+                                )[CharactersViewModel::class.java]
+                                    .showNotice(Notice(R.string.letter_sent))
+                            }
+                        }
                     },
                     onBack = { navController.popBackStack() },
                     isRegistered = isRegistered,

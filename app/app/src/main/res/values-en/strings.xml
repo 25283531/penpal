@@ -13,7 +13,6 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_confirm">OK</string>
     <string name="action_back">Back</string>
-    <string name="action_done">Done</string>
     <string name="action_refresh_desc">Refresh</string>
     <string name="loading">Loading…</string>
     <string name="network_error">No network — showing the last saved content</string>
@@ -74,9 +73,6 @@
     <string name="letter_reply_today">Reply expected today</string>
     <string name="letter_reply_expected">Reply expected on %1$s</string>
     <string name="letter_reply_expected_raw">Expected reply: %1$s</string>
-    <string name="letter_sent_title">Your letter is on its way</string>
-    <string name="letter_sent_rules">Your first letter gets a reply today; after that, free accounts get a reply every 3 days and members every day. This isn\'t instant messaging — it\'s slow mail, so please be patient.</string>
-    <string name="letter_sent_reminder">When the reply arrives it will show up in your Home timeline, and you\'ll get a reminder.</string>
     <string name="letter_write_intro">Your first letter gets a reply today; after that, free accounts get a reply every 3 days and members every day. This isn\'t instant messaging — it\'s slow mail. You can send at most 1 letter a day.</string>
     <string name="letter_detail_rule">First reply the same day; after that, free accounts get a reply every 3 days and members every day. This isn\'t instant messaging — it\'s slow mail.</string>
 
