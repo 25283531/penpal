@@ -177,6 +177,103 @@ class GoTabTest {
         assertEquals(listOf(Routes.HOME, Routes.ME), stack())
     }
 
+    /**
+     * Diagnostic dump: current destination + the full back stack
+     * (including the NavGraph entry, shown as "<graph>"), printed to
+     * stdout so the CI JUnit XML (system-out) shows exactly what the
+     * NavController did at each step, instead of only the final
+     * expected/actual of a failed assertion.
+     */
+    private fun dump(tag: String) {
+        val entries = navController.backStack.joinToString(", ") {
+            it.destination.route ?: "<graph>"
+        }
+        println(
+            "GOTAB-DIAG [$tag] current=" +
+                "${navController.currentDestination?.route} stack=[$entries]"
+        )
+    }
+
+    /**
+     * No assertions — pure diagnosis of the failing shape
+     * [home, me, account] -> goTab(ME). The dumps distinguish:
+     *  - stack unchanged [home, me, account]: navigate() was a
+     *    complete no-op (popUpTo never ran);
+     *  - stack [home]: popUpTo ran but ME was never re-added
+     *    (restore / launchSingleTop / create all failed);
+     *  - stack [home, me]: it worked (then the CI failure would be
+     *    elsewhere).
+     * The probes then show whether a plain navigate(ME) works from
+     * the post-goTab state, and whether popBackStack works at all.
+     */
+    @Test
+    fun diagnose_me_account_toMe() {
+        navController.navigate(Routes.ME)
+        navController.navigate(Routes.ACCOUNT)
+        dump("before goTab(ME)")
+        navigateToTab(navController, Routes.ME)
+        dump("after goTab(ME)")
+        navController.navigate(Routes.ME)
+        dump("after plain navigate(ME)")
+        val popped = navController.popBackStack()
+        dump("after popBackStack=$popped")
+    }
+
+    /** goTab variant WITHOUT restoreState (popUpTo saveState +
+     * launchSingleTop only). If this lands on ME, restoreState is the
+     * culprit and the production fix is to drop it. */
+    private fun goTabNoRestore(navController: TestNavHostController, route: String) {
+        navController.navigate(route) {
+            popUpTo(navController.graph.findStartDestination().id) {
+                saveState = true
+            }
+            launchSingleTop = true
+        }
+    }
+
+    /** goTab variant WITHOUT saveState/restoreState at all
+     * (plain popUpTo + launchSingleTop). */
+    private fun goTabNoState(navController: TestNavHostController, route: String) {
+        navController.navigate(route) {
+            popUpTo(navController.graph.findStartDestination().id)
+            launchSingleTop = true
+        }
+    }
+
+    @Test
+    fun variant_noRestore_me_account_toMe() {
+        navController.navigate(Routes.ME)
+        navController.navigate(Routes.ACCOUNT)
+        goTabNoRestore(navController, Routes.ME)
+        dump("variant noRestore after goTab(ME)")
+        assertEquals(Routes.ME, navController.currentDestination?.route)
+        assertEquals(listOf(Routes.HOME, Routes.ME), stack())
+    }
+
+    @Test
+    fun variant_noRestore_loginHome_thenMe() {
+        navController.navigate(Routes.ACCOUNT)
+        goTabNoRestore(navController, Routes.HOME)
+        dump("variant noRestore after goTab(HOME)")
+        assertEquals(Routes.HOME, navController.currentDestination?.route)
+        assertEquals(listOf(Routes.HOME), stack())
+
+        goTabNoRestore(navController, Routes.ME)
+        dump("variant noRestore after goTab(ME)")
+        assertEquals(Routes.ME, navController.currentDestination?.route)
+        assertEquals(listOf(Routes.HOME, Routes.ME), stack())
+    }
+
+    @Test
+    fun variant_noState_me_account_toMe() {
+        navController.navigate(Routes.ME)
+        navController.navigate(Routes.ACCOUNT)
+        goTabNoState(navController, Routes.ME)
+        dump("variant noState after goTab(ME)")
+        assertEquals(Routes.ME, navController.currentDestination?.route)
+        assertEquals(listOf(Routes.HOME, Routes.ME), stack())
+    }
+
     @Test
     fun onAccount_noTabIsSelected() {
         // While the change-password page is showing, the bottom bar
