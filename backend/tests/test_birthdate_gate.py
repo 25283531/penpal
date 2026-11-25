@@ -7,8 +7,8 @@ gate for NEW email registrations:
 - under-18 (by birth date) refused with stable code age_under_18;
 - boundary: 18th birthday itself passes, one day before it refuses;
 - future dates and malformed dates refused;
-- a missing birth date is refused outright (birth_date_required) —
-  an `age` number alone never registers;
+- legacy age-only clients keep the old behaviour (14+ gate,
+  14-17 minor_mode) and are marked age_source="legacy_age";
 - birth date encrypted at rest (never plaintext) and never returned
   by any API (at most the `is_adult` flag);
 - anonymous device auth keeps NO age gate at all: any age or birth
@@ -186,21 +186,41 @@ def test_birth_date_wins_over_age():
     assert user["age"] == 30
 
 
-# ---------- registration requires a birth date (no legacy path) ----------
+# ---------- legacy age-only clients keep working ----------
 
-def test_register_without_birth_date_refused():
-    # An age number alone never registers — not 30, not 16, not 13.
-    for email, age in (("bd-nobd30@example.com", 30),
-                       ("bd-nobd16@example.com", 16),
-                       ("bd-nobd13@example.com", 13)):
-        r = _register(email, age=age)
-        assert r.status_code == 400, r.text
-        assert r.json()["code"] == "birth_date_required"
-        assert database.get_user_by_email(email) is None
-    r = _register("bd-nobd-none@example.com")
+def test_legacy_age_only_register_still_works():
+    r = _register("bd-legacy30@example.com", age=30)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["age"] == 30
+    assert body["is_adult"] is True
+    assert body["age_source"] == "legacy_age"
+    assert _raw_birth_date("users", "email", "bd-legacy30@example.com") is None
+    assert _raw_birth_date("devices", "device_id", body["device_id"]) is None
+
+
+def test_legacy_age_only_minor_keeps_old_gate():
+    # 14-17: old behaviour — registered, minor_mode on.
+    r = _register("bd-legacy16@example.com", age=16)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["minor_mode"] is True
+    assert body["is_adult"] is False
+    assert body["age_source"] == "legacy_age"
+    # Under 14: old gate still refuses.
+    r = _register("bd-legacy13@example.com", age=13)
     assert r.status_code == 400, r.text
-    assert r.json()["code"] == "birth_date_required"
-    assert database.get_user_by_email("bd-nobd-none@example.com") is None
+    assert r.json()["code"] == "underage_refused"
+    assert database.get_user_by_email("bd-legacy13@example.com") is None
+
+
+def test_register_without_any_age_refused():
+    # Neither birth_date nor age: the old refusal (400 age_required),
+    # not a successful registration.
+    r = _register("bd-noage@example.com")
+    assert r.status_code == 400, r.text
+    assert r.json()["code"] == "age_required"
+    assert database.get_user_by_email("bd-noage@example.com") is None
 
 
 def test_device_auth_with_birth_date():

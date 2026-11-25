@@ -12,13 +12,13 @@ Anonymous device auth has NO age gate: a fresh device always gets a
 token (age stored NULL when unknown), so first launch can always
 browse. Email registration takes a birth date (strict YYYY-MM-DD)
 and refuses anyone under 18 on the day of registration
-(age_under_18) — and a missing birth date is refused outright
-(birth_date_required); an `age` number alone never satisfies
-registration. The birth date is encrypted at rest and never
-returned — APIs only ever expose an `is_adult` flag. Already-
-registered accounts are never re-gated. Full minor mode is M2).
-Phase 1 is FREE: everyone is on the free tier, no payment is taken;
-tier checks are enforced anyway.
+(age_under_18). The birth date is encrypted at rest and never
+returned — APIs only ever expose an `is_adult` flag. Legacy clients
+that only send an `age` number keep the old behaviour (under-14s
+refused, 14–17s get minor_mode=1) so old apps do not break;
+already-registered accounts are never re-gated. Full minor mode is
+M2). Phase 1 is FREE: everyone is on the free tier, no payment is
+taken; tier checks are enforced anyway.
 
 Anonymous browsing is READ-ONLY: an anonymous device can look around
 but cannot send letters (403 anonymous_letter_forbidden) and earns no
@@ -159,10 +159,9 @@ class RegisterIn(BaseModel):
     email: str
     password: str = Field(..., min_length=1, max_length=128)
     age: int | None = Field(None, ge=1, le=120)
-    # Birth date (YYYY-MM-DD) is REQUIRED for registration: the 18+
-    # gate is computed from it. A bare `age` number never satisfies
-    # registration (birth_date_required); when both are sent,
-    # birth_date wins and `age` is ignored.
+    # Birth date (YYYY-MM-DD, required for new clients): the 18+
+    # gate is computed from it; `age` is kept only so legacy clients
+    # that cannot send a birth date keep working (old 14+ gate).
     birth_date: str | None = None
     captcha_token: str | None = None
     captcha_text: str | None = None
@@ -312,46 +311,43 @@ def health():
 def _resolve_registration_age(
     birth_date: str | None, age: int | None,
 ) -> tuple[int | None, str | None, str]:
-    """Resolve the effective age for an EMAIL registration.
+    """Resolve the effective age for a new registration.
 
-    Returns (age, birth_date_iso, age_source). `birth_date` is
-    REQUIRED: a missing one is refused outright
-    (birth_date_required) — an `age` number alone never satisfies
-    registration, so the legacy age-only path cannot slip through.
-    When `birth_date` is given it wins: strict YYYY-MM-DD, never a
-    future date, and the registrant must be 18+ on the day of
-    registration (whole years — the birthday must already have passed
-    this year). Failures raise ApiError with stable codes
-    (birth_date_required / invalid_birth_date /
-    birth_date_in_future / age_under_18).
+    Returns (age, birth_date_iso, age_source). When `birth_date` is
+    given it wins: strict YYYY-MM-DD, never a future date, and the
+    registrant must be 18+ on the day of registration (whole years —
+    the birthday must already have passed this year). Failures raise
+    ApiError with stable codes (invalid_birth_date /
+    birth_date_in_future / age_under_18). Legacy clients that only
+    send `age` return age_source="legacy_age" and keep the old
+    behaviour (the 14+ gate lives in get_or_create_device); the
+    response marks them so the old client is observable.
     """
-    if birth_date is None:
-        raise ApiError(
-            400, "birth_date_required", "请填写出生日期",
-        )
-    try:
-        born = database.parse_birth_date(birth_date)
-    except ValueError as e:
-        if "future" in str(e):
+    if birth_date is not None:
+        try:
+            born = database.parse_birth_date(birth_date)
+        except ValueError as e:
+            if "future" in str(e):
+                raise ApiError(
+                    400, "birth_date_in_future", "出生日期不能是未来日期",
+                ) from e
             raise ApiError(
-                400, "birth_date_in_future", "出生日期不能是未来日期",
+                400, "invalid_birth_date",
+                "出生日期格式不正确，请使用 YYYY-MM-DD",
             ) from e
-        raise ApiError(
-            400, "invalid_birth_date",
-            "出生日期格式不正确，请使用 YYYY-MM-DD",
-        ) from e
-    effective_age = database.age_from_birth_date(born)
-    if effective_age < database.ADULT_AGE:
-        raise ApiError(
-            400, "age_under_18",
-            "不符合使用条件，必须年满 18 周岁才能使用本软件",
-        )
-    if effective_age > 120:
-        raise ApiError(
-            400, "invalid_birth_date",
-            "出生日期格式不正确，请使用 YYYY-MM-DD",
-        )
-    return effective_age, born.isoformat(), "birth_date"
+        effective_age = database.age_from_birth_date(born)
+        if effective_age < database.ADULT_AGE:
+            raise ApiError(
+                400, "age_under_18",
+                "不符合使用条件，必须年满 18 周岁才能使用本软件",
+            )
+        if effective_age > 120:
+            raise ApiError(
+                400, "invalid_birth_date",
+                "出生日期格式不正确，请使用 YYYY-MM-DD",
+            )
+        return effective_age, born.isoformat(), "birth_date"
+    return age, None, "legacy_age"
 
 
 @app.post("/api/v1/auth/device")
@@ -491,12 +487,12 @@ def auth_register(body: RegisterIn):
     if len(body.password) < 8:
         raise ApiError(400, "password_too_short", "密码至少 8 位")
     # Birth-date gate first, before the single-use captcha is spent:
-    # an under-18 / malformed / future / missing birth date must not
-    # burn it. _resolve_registration_age refuses a missing birth date
-    # outright — an `age` number alone never registers.
+    # an under-18 / malformed / future birth date must not burn it.
     effective_age, birth_date_iso, age_source = _resolve_registration_age(
         body.birth_date, body.age,
     )
+    if age_source == "legacy_age":
+        logger.info("register: legacy age-only client (no birth_date)")
     _require_captcha_or_400(body.captcha_token, body.captcha_text)
     if database.get_user_by_email(email):
         raise ApiError(400, "email_already_registered", "该邮箱已注册")

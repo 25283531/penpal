@@ -17,9 +17,11 @@ Covers:
   birth date, malformed or future birth date;
 - re-authenticating an existing device without age still works
   (old accounts are never re-gated);
-- [RED LINE] email registration still requires a birth date
-  (missing -> 400 birth_date_required, even with an age number)
-  and still refuses under-18s (400 age_under_18).
+- [RED LINE] email registration keeps the legacy age-only path
+  (an `age` number alone still registers: 30 as legacy_age, 14–17
+  minor mode, under-14 refused) and still refuses under-18s by
+  birth date (400 age_under_18); only a registration with neither
+  birth_date nor age is refused (400 age_required).
 """
 import os
 import tempfile
@@ -123,15 +125,26 @@ def _register(email: str, birth_date: str | None = None,
     return client.post("/api/v1/auth/register", json=body)
 
 
-def test_register_without_birth_date_refused_even_with_age():
-    # An age number alone never satisfies registration.
+def test_register_legacy_age_only_still_works():
+    # Old apps that only send an `age` number still register on the
+    # legacy path (14+ gate, 14–17 minor mode).
     r = _register("anon-gate-age30@example.com", age=30)
+    assert r.status_code == 200, r.text
+    assert r.json()["age_source"] == "legacy_age"
+    assert r.json()["is_adult"] is True
+    r = _register("anon-gate-age16@example.com", age=16)
+    assert r.status_code == 200, r.text
+    assert r.json()["minor_mode"] is True
+    assert r.json()["age_source"] == "legacy_age"
+    # Under 14: the old gate still refuses.
+    r = _register("anon-gate-age13@example.com", age=13)
     assert r.status_code == 400, r.text
-    assert r.json()["code"] == "birth_date_required"
-    assert database.get_user_by_email("anon-gate-age30@example.com") is None
+    assert r.json()["code"] == "underage_refused"
+    assert database.get_user_by_email("anon-gate-age13@example.com") is None
+    # Neither birth_date nor age: refused the old way (400 age_required).
     r = _register("anon-gate-noage@example.com")
     assert r.status_code == 400, r.text
-    assert r.json()["code"] == "birth_date_required"
+    assert r.json()["code"] == "age_required"
     assert database.get_user_by_email("anon-gate-noage@example.com") is None
 
 
