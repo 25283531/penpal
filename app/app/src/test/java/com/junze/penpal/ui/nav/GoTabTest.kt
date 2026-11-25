@@ -47,9 +47,13 @@ class GoTabTest {
 
     private lateinit var navController: TestNavHostController
 
-    /** The back stack as a list of routes, oldest first. */
+    /**
+     * The back stack as a list of routes, oldest first. The NavController
+     * also keeps an entry for the NavGraph itself (route null) at the
+     * bottom of the queue — it is not a destination, so filter it out.
+     */
     private fun stack(): List<String?> =
-        navController.backStack.map { it.destination.route }
+        navController.backStack.mapNotNull { it.destination.route }
 
     @Before
     fun setUp() {

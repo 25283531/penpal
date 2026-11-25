@@ -48,6 +48,16 @@ jobs:
         working-directory: app
         run: gradle :app:testDebugUnitTest --stacktrace
 
+      # On failure, keep the JUnit XML (expected/actual per test) so a
+      # failing navigation assertion can be read instead of guessed.
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: app/app/build/test-results/testDebugUnitTest/
+          if-no-files-found: error
+
       - name: Upload APK
         if: always()
         uses: actions/upload-artifact@v4
