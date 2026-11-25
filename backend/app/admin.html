@@ -70,7 +70,7 @@
   <main>
     <section id="tab-dashboard" class="active">
       <h2>仪表盘</h2>
-      <div class="privacy">隐私说明：后台只展示汇总数字，不查看任何单个用户的内容（信件、记忆原文均不展示）。第一阶段不收费，所有用户均为免费档。例外：信件查看（审计）页可解密查看单封信件，但必须填写查看原因，每一次查看都会记入审计日志。</div>
+      <div class="privacy">隐私说明：后台只展示汇总数字，不查看任何单个用户的内容（信件、记忆原文均不展示）。第一阶段不收费，所有用户均为免费档。例外：信件查看（审计）页可解密查看单封信件，但必须填写查看原因、并当场出示解密密钥（粘贴密钥内容或上传密钥文件），每一次查看都会记入审计日志。服务器仍保留密钥文件用于生成回信，改的只是管理员查看这条路：随手点开看不到内容，必须本次出示密钥才能解密查看。</div>
       <div class="cards" id="stat-cards"></div>
       <h3>今日活跃（去重设备数）</h3>
       <div class="cards"><div class="card"><b id="stat-dau">–</b><span>今日活跃设备</span></div></div>
@@ -158,7 +158,7 @@
 
     <section id="tab-letters">
       <h2>信件查看（审计）</h2>
-      <div class="privacy">列表只显示元数据（人物、时间、状态、设备摘要），绝不显示信件内容。点开一封信查看内容前必须填写查看原因；每一次查看（包括解密失败的尝试）都会被强制记入审计日志，写日志失败则本次查看直接被拒绝。</div>
+      <div class="privacy">列表只显示元数据（人物、时间、状态、设备摘要），绝不显示信件内容。点开一封信查看内容前必须填写查看原因，并当场出示解密密钥（粘贴 .encryption.key 里的内容，或上传密钥文件）；只用本次出示的密钥解密，密钥不保存、不记录，查看后立即清空。原因选“其他”时备注必填。每一次查看（包括密钥不对、解密失败的尝试）都会被强制记入审计日志，写日志失败则本次查看直接被拒绝。服务器仍保留密钥文件用于生成回信——改的只是管理员查看这条路。</div>
       <h3>按元数据检索</h3>
       <label>人物</label>
       <select id="flt-character"><option value="">全部</option><option>P01</option><option>P02</option><option>P03</option><option>P04</option><option>P05</option></select>
@@ -184,8 +184,12 @@
         <option value="故障排查">故障排查</option>
         <option value="其他">其他</option>
       </select>
-      <label>备注（可选）</label>
+      <label>备注<span id="view-note-required" style="color:#c0392b;display:none">（必填：原因选“其他”时必须填写）</span><span id="view-note-optional">（可选）</span></label>
       <input type="text" id="view-note" maxlength="500" placeholder="补充说明，不要把信件内容写在这里">
+      <label>解密密钥（必填，本次查看专用）</label>
+      <input type="password" id="view-key" autocomplete="off" placeholder="粘贴 .encryption.key 里的密钥字符串">
+      <p class="hint">或上传密钥文件：<input type="file" id="view-key-file" style="width:auto;max-width:560px"></p>
+      <p class="hint">密钥只用于本次解密，不保存、不记入日志，查看后立即清空。服务器仍保留密钥文件用于生成回信；没有密钥，管理员在后台看不到任何信件内容。</p>
       <button class="btn" id="view-letter-btn">解密查看</button>
       <pre id="letter-content" style="white-space:pre-wrap;background:#F2F0EB;border:1px solid #D8D2C4;border-radius:8px;padding:12px;margin-top:12px;display:none"></pre>
     </section>
@@ -288,20 +292,50 @@ async function loadAudit() {
 }
 $("letters-search-btn").addEventListener("click", async () => { try { await loadLetters(); } catch (e) { toast("检索失败：" + e.message); } });
 $("audit-search-btn").addEventListener("click", async () => { try { await loadAudit(); } catch (e) { toast("检索失败：" + e.message); } });
+function updateNoteRequired() {
+  const isOther = $("view-reason").value === "其他";
+  $("view-note-required").style.display = isOther ? "" : "none";
+  $("view-note-optional").style.display = isOther ? "none" : "";
+  const noteOk = !isOther || $("view-note").value.trim() !== "";
+  const keyOk = $("view-key").value.trim() !== "";
+  $("view-letter-btn").disabled = !(noteOk && keyOk);
+}
+$("view-reason").addEventListener("change", updateNoteRequired);
+$("view-note").addEventListener("input", updateNoteRequired);
+$("view-key").addEventListener("input", updateNoteRequired);
+$("view-key-file").addEventListener("change", () => {
+  const f = $("view-key-file").files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => { $("view-key").value = String(reader.result || "").trim(); updateNoteRequired(); };
+  reader.onerror = () => toast("读取密钥文件失败");
+  reader.readAsText(f);
+});
+updateNoteRequired();
 $("view-letter-btn").addEventListener("click", async () => {
   const id = $("view-letter-id").value.trim();
   const reason = $("view-reason").value;
   const note = $("view-note").value.trim();
+  const key = $("view-key").value.trim();
   const box = $("letter-content");
   if (!id) { toast("请先填信件编号"); return; }
   if (!reason) { toast("查看信件必须先选查看原因"); return; }
+  if (reason === "其他" && !note) { toast("原因选“其他”时必须填写备注"); return; }
+  if (!key) { toast("查看信件必须当场出示解密密钥"); return; }
   try {
-    const r = await api(`/api/v1/admin/letters/${id}/view`, { method: "POST", body: JSON.stringify({ reason, note: note || null }) });
+    const r = await api(`/api/v1/admin/letters/${id}/view`, { method: "POST", body: JSON.stringify({ reason, note: note || null, decryption_key: key }) });
     box.style.display = "block";
     box.textContent = `信件 #${r.id} · ${r.character_id} · ${r.direction} · ${r.created_at}（审计 #${r.audit_id}）\n\n${r.text}`;
     toast("已查看，审计已记录");
     await loadAudit();
   } catch (e) { box.style.display = "none"; toast("查看失败：" + e.message); }
+  finally {
+    // The presented key lives only for this one view: clear it (and
+    // the file picker) whether the view succeeded or not.
+    $("view-key").value = "";
+    $("view-key-file").value = "";
+    updateNoteRequired();
+  }
 });
 async function saveSettings(keys) {
   const vals = {};

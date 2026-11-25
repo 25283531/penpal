@@ -8,11 +8,24 @@ admin endpoints require a valid session.
 PRIVACY RED LINE: the admin console only ever sees AGGREGATE numbers —
 totals, letters per character, per-type violation counts — EXCEPT for
 the audited letter-view path below (/letters … /view + /audit-log).
-That path is the single exception, and it is gated: a view needs a
-stated reason, decrypts in memory only, and writes one append-only
-audit row (time, operator, letter id, reason, result — never content)
-before the content is returned. If the audit write fails, the view is
-refused. There is no delete endpoint for the audit log.
+That path is the single exception, and it is gated twice: a view needs
+a stated reason AND the admin must present the decryption key for this
+one view (paste the .encryption.key contents, or upload the key file).
+The presented key is checked against the stored key's SHA256
+fingerprint with a constant-time comparison and is then used — not
+the stored key file — to decrypt in memory only; it is never logged,
+never echoed back, and is dropped as soon as the request ends. A
+missing or wrong key is refused and the attempt itself is audited
+(result key_missing / key_mismatch). Every view writes one
+append-only audit row (time, operator, letter id, reason, result —
+never content) before the content is returned. If the audit write
+fails, the view is refused. There is no delete endpoint for the audit
+log.
+
+NOTE: the server still keeps its key file — reply generation has to
+read letters, so it needs the key. What changed is only the *admin
+view* path: clicking a letter in /admin no longer decrypts on its
+own; the admin must present the key each time.
 """
 import hashlib
 import hmac
@@ -155,6 +168,11 @@ def _operator_label(session_token: str) -> str:
 class LetterViewIn(BaseModel):
     reason: str = Field(..., min_length=1, max_length=20)
     note: str | None = Field(None, max_length=500)
+    # Decryption key presented by the admin for THIS view only (the
+    # contents of .encryption.key, pasted or uploaded). Required: the
+    # view decrypts with this key, never with the stored key file.
+    # Never logged, never echoed back, dropped when the request ends.
+    decryption_key: str | None = Field(None, max_length=200)
 
 
 @router.get("/letters")
@@ -189,14 +207,29 @@ def admin_letter_metadata(letter_id: int, request: Request):
 def admin_view_letter(letter_id: int, body: LetterViewIn, request: Request):
     """Decrypt and show one letter's content — audited, always.
 
+    The admin must present the decryption key for this one view
+    (decryption_key = the contents of .encryption.key). The presented
+    key is checked against the stored key's SHA256 fingerprint with a
+    constant-time comparison; only then is it used to decrypt, in
+    memory only. The key value is never logged or echoed back, and is
+    dropped when the request ends. The server still keeps its key
+    file — reply generation needs it — this gate applies to the admin
+    view path only.
+
     Order of operations (deliberate):
     1. reason is validated first (missing/invalid reason -> 400, no
        decryption, no audit row for a view that never happened);
-    2. the letter is decrypted in memory;
-    3. the audit row is written BEFORE any content is returned — if
+    2. reason "其他" with an empty note -> 400, likewise no audit
+       row, no decryption;
+    3. the letter must exist (missing -> 404, audited not_found);
+    4. the presented key must be present and match the stored key's
+       fingerprint (missing -> 400 key_missing, mismatch -> 403
+       key_mismatch; both audited, no content returned);
+    5. the letter is decrypted in memory with the PRESENTED key;
+    6. the audit row is written BEFORE any content is returned — if
        the audit write fails, the view is refused (503) and no content
        is returned;
-    4. a decrypt failure is itself audited (result=decrypt_failed)
+    7. a decrypt failure is itself audited (result=decrypt_failed)
        and returns an error, never partial content.
     """
     token = require_admin(request)
@@ -208,6 +241,11 @@ def admin_view_letter(letter_id: int, body: LetterViewIn, request: Request):
             "查看信件必须填写查看原因（执法检查 / 用户申诉 / 故障排查 / 其他）",
         )
     note = (body.note or "").strip() or None
+    if reason == "其他" and not note:
+        raise ApiError(
+            400, "audit_note_required_for_other",
+            "查看原因选“其他”时必须填写备注",
+        )
     raw = database.get_letter_raw(letter_id)
     if raw is None:
         try:
@@ -217,12 +255,31 @@ def admin_view_letter(letter_id: int, body: LetterViewIn, request: Request):
         except Exception:
             pass  # a missing letter is a 404 either way
         raise ApiError(404, "letter_not_found", "letter not found")
+    presented = (body.decryption_key or "").strip()
+    if not presented:
+        _audit_key_failure(operator, letter_id, reason, note, "key_missing")
+        raise ApiError(
+            400, "decryption_key_required",
+            "查看信件必须当场出示解密密钥（粘贴 .encryption.key 里的内容，或上传密钥文件）；不出示无法解密查看",
+        )
+    if not crypto.presented_key_matches(presented):
+        _audit_key_failure(operator, letter_id, reason, note, "key_mismatch")
+        presented = ""
+        raise ApiError(
+            403, "decryption_key_mismatch",
+            "出示的解密密钥与服务器密钥不符，本次查看已被拒绝并记入审计日志",
+        )
     try:
-        text = crypto.decrypt_text(raw["text_encrypted"])
+        text = crypto.decrypt_text_with_key(raw["text_encrypted"], presented)
         result = "ok"
     except (InvalidToken, ValueError):
         text = None
         result = "decrypt_failed"
+    finally:
+        # Drop the presented key from this request's memory as soon as
+        # decryption is done; it must not linger in the request body.
+        presented = ""
+        body.decryption_key = None
     try:
         audit = database.record_audit_log(
             operator,
@@ -241,6 +298,20 @@ def admin_view_letter(letter_id: int, body: LetterViewIn, request: Request):
         )
     meta = {k: v for k, v in raw.items() if k != "text_encrypted"}
     return {**meta, "text": text, "audit_id": audit["id"]}
+
+
+def _audit_key_failure(operator: str, letter_id: int, reason: str,
+                       note: str | None, result: str) -> None:
+    """Best-effort audit row for a refused key attempt (key_missing /
+    key_mismatch). The row carries no letter content and no key
+    material — only the result. A failed audit write must not change
+    the refusal itself, so failures are swallowed here."""
+    try:
+        database.record_audit_log(
+            operator, "letter_view_failed", letter_id, reason, result, note,
+        )
+    except Exception:
+        pass
 
 
 @router.get("/audit-log")

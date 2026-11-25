@@ -94,6 +94,12 @@ ERROR_CODES: dict[str, str] = {
     "invalid_price": "price must be a number >= 0",
     "message_not_found": "no such admin message",
     "activity_not_found": "no such admin activity",
+    "audit_reason_required": "viewing a letter requires a reason",
+    "audit_note_required_for_other": "reason 'other' requires a note",
+    "audit_log_failed": "audit log write failed; view refused",
+    "letter_decrypt_failed": "letter decrypt failed",
+    "decryption_key_required": "viewing a letter requires presenting the decryption key",
+    "decryption_key_mismatch": "presented decryption key does not match the stored key",
     # photos / misc
     "photo_not_found": "no such character photo",
     # LLM / reply generation (also used in process-due detail entries)
