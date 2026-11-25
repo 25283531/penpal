@@ -71,6 +71,7 @@ enum class ErrorKey {
     SELF_REFERRAL,
     AGE_INVALID,
     AGE_UNDER_18,
+    BIRTH_DATE_REQUIRED,
     BIRTH_DATE_INVALID,
     BIRTH_DATE_FUTURE,
     VALIDATION_ERROR,
@@ -126,6 +127,7 @@ fun ErrorKey.resId(): Int = when (this) {
     ErrorKey.SELF_REFERRAL -> R.string.err_self_referral
     ErrorKey.AGE_INVALID -> R.string.err_age_invalid
     ErrorKey.AGE_UNDER_18 -> R.string.err_age_under_18
+    ErrorKey.BIRTH_DATE_REQUIRED -> R.string.err_birth_date_required
     ErrorKey.BIRTH_DATE_INVALID -> R.string.err_birth_date_invalid
     ErrorKey.BIRTH_DATE_FUTURE -> R.string.err_birth_date_future
     ErrorKey.VALIDATION_ERROR -> R.string.err_validation_error
@@ -181,6 +183,7 @@ private fun keyForCode(code: String): ErrorKey? = when (code) {
     "self_referral" -> ErrorKey.SELF_REFERRAL
     "age_required", "age_invalid", "underage_refused" -> ErrorKey.AGE_INVALID
     "age_under_18", "under_18" -> ErrorKey.AGE_UNDER_18
+    "birth_date_required" -> ErrorKey.BIRTH_DATE_REQUIRED
     "invalid_birth_date" -> ErrorKey.BIRTH_DATE_INVALID
     "birth_date_in_future" -> ErrorKey.BIRTH_DATE_FUTURE
     "validation_error" -> ErrorKey.VALIDATION_ERROR
@@ -332,10 +335,53 @@ internal fun extractJsonString(body: String, field: String): String? {
  * back to anonymous auth once an email account exists. */
 class SessionExpiredException : Exception("session expired")
 
+/** Anonymous device auth failed on a server that still applies an age
+ * gate to it (old server behaviour): the app must never show age
+ * wording for a browse-only identity, so this maps to the generic
+ * error text instead. Thrown by the repository (see
+ * PenpalRepository.authenticate) instead of the raw HttpException.
+ * Registration keeps its own age mapping above — this is only for
+ * the anonymous device-auth path, which has no age gate. */
+class DeviceAuthException : Exception("anonymous device auth failed")
+
+/** Age-gate codes / detail wordings that must never be shown for an
+ * anonymous (browse-only) identity. */
+private val AGE_GATE_CODES = setOf(
+    "age_required", "age_invalid", "underage_refused",
+    "age_under_18", "under_18"
+)
+private val AGE_GATE_DETAIL_NEEDLES = listOf(
+    "age is required", "age must be", "users under 14",
+    "users under 18", "under 18", "must be 18", "未满 18", "年满 18"
+)
+
+/**
+ * True when this failure is an age-gate refusal (code or detail).
+ * Consumes the error body once — callers must not read it again
+ * afterwards ([Throwable.errorMapping] degrades to the per-status
+ * mapping when the body is already consumed, which is equivalent
+ * for every failure anonymous auth can produce).
+ */
+fun HttpException.isAgeGateFailure(): Boolean {
+    val body = try {
+        response()?.errorBody()?.string()
+    } catch (_: Exception) {
+        null
+    }
+    if (body.isNullOrBlank()) return false
+    val code = extractJsonString(body, "code")
+    if (code != null && code.trim() in AGE_GATE_CODES) return true
+    val detail = extractJsonString(body, "detail") ?: return false
+    return AGE_GATE_DETAIL_NEEDLES.any { it in detail }
+}
+
 /** Pure mapping for a failure: never returns backend text or a raw message. */
 fun Throwable.errorMapping(): ErrorMapping {
     if (this is SessionExpiredException) {
         return ErrorMapping(ErrorKey.SESSION_EXPIRED)
+    }
+    if (this is DeviceAuthException) {
+        return ErrorMapping(ErrorKey.UNKNOWN_ERROR)
     }
     if (this is IOException) {
         return ErrorMapping(ErrorKey.SERVER_UNREACHABLE)

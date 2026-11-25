@@ -3,14 +3,16 @@
 Run with: /tmp/penpal-venv/bin/python -m pytest backend/tests/ -q
 
 Covers the switch from the legacy age-number gate to a birth-date
-gate for NEW registrations:
+gate for NEW email registrations:
 - under-18 (by birth date) refused with stable code age_under_18;
 - boundary: 18th birthday itself passes, one day before it refuses;
 - future dates and malformed dates refused;
+- a missing birth date is refused outright (birth_date_required) —
+  an `age` number alone never registers;
 - birth date encrypted at rest (never plaintext) and never returned
   by any API (at most the `is_adult` flag);
-- legacy age-only clients keep the old behaviour (14+ gate,
-  14-17 minor_mode) and are marked age_source="legacy_age";
+- anonymous device auth keeps NO age gate at all: any age or birth
+  date (including under-18) is stored, never refused;
 - already-registered accounts are never re-gated;
 - old databases (no birth_date column) gain the nullable column via
   migration, with legacy rows left NULL.
@@ -184,38 +186,34 @@ def test_birth_date_wins_over_age():
     assert user["age"] == 30
 
 
-# ---------- legacy age-only clients keep working ----------
+# ---------- registration requires a birth date (no legacy path) ----------
 
-def test_legacy_age_only_register_still_works():
-    r = _register("bd-legacy30@example.com", age=30)
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["age"] == 30
-    assert body["is_adult"] is True
-    assert body["age_source"] == "legacy_age"
-    assert _raw_birth_date("users", "email", "bd-legacy30@example.com") is None
-    assert _raw_birth_date("devices", "device_id", body["device_id"]) is None
-
-
-def test_legacy_age_only_minor_keeps_old_gate():
-    # 14-17: old behaviour — registered, minor_mode on.
-    r = _register("bd-legacy16@example.com", age=16)
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["minor_mode"] is True
-    assert body["is_adult"] is False
-    assert body["age_source"] == "legacy_age"
-    # Under 14: old gate still refuses.
-    r = _register("bd-legacy13@example.com", age=13)
+def test_register_without_birth_date_refused():
+    # An age number alone never registers — not 30, not 16, not 13.
+    for email, age in (("bd-nobd30@example.com", 30),
+                       ("bd-nobd16@example.com", 16),
+                       ("bd-nobd13@example.com", 13)):
+        r = _register(email, age=age)
+        assert r.status_code == 400, r.text
+        assert r.json()["code"] == "birth_date_required"
+        assert database.get_user_by_email(email) is None
+    r = _register("bd-nobd-none@example.com")
     assert r.status_code == 400, r.text
+    assert r.json()["code"] == "birth_date_required"
+    assert database.get_user_by_email("bd-nobd-none@example.com") is None
 
 
 def test_device_auth_with_birth_date():
+    # Anonymous auth has NO age gate: an under-18 birth date is
+    # stored (minor mode on), never refused.
     r = client.post("/api/v1/auth/device", json={
         "device_id": "bd-device-under18", "birth_date": _years_ago_iso(17),
     })
-    assert r.status_code == 400, r.text
-    assert r.json()["code"] == "age_under_18"
+    assert r.status_code == 200, r.text
+    assert r.json()["is_adult"] is False
+    assert r.json()["minor_mode"] is True
+    assert r.json()["age"] == 17
+    assert r.json()["age_source"] == "birth_date"
     born = _years_ago_iso(25)
     r = client.post("/api/v1/auth/device", json={
         "device_id": "bd-device-adult", "birth_date": born,
@@ -230,11 +228,11 @@ def test_device_auth_with_birth_date():
 # ---------- old accounts are never re-gated ----------
 
 def test_old_account_unaffected_by_new_gate():
-    # Legacy-registered minor (age 16, no birth date) can still log in.
-    reg = _register("bd-old16@example.com", age=16)
+    # An adult registered with a birth date can still log in.
+    reg = _register("bd-old30@example.com", birth_date=_years_ago_iso(30))
     assert reg.status_code == 200, reg.text
     login = client.post("/api/v1/auth/login-email", json={
-        "email": "bd-old16@example.com", "password": "password123",
+        "email": "bd-old30@example.com", "password": "password123",
     })
     assert login.status_code == 200, login.text
     me = client.get("/api/v1/auth/me",

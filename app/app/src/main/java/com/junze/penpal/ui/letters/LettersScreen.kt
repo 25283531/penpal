@@ -82,17 +82,39 @@ import kotlinx.coroutines.launch
 // ---------- Characters ----------
 
 class CharactersViewModel(
-    private val repository: PenpalRepository
+    private val repository: PenpalRepository,
+    private val settings: SettingsStore
 ) : ViewModel() {
 
     val characters: StateFlow<List<CharacterDto>> = repository.characters
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** Null = no email account yet: the screen shows the browse-only
+     * status ("未注册、仅浏览") instead of any age wording. */
+    val accountEmail: StateFlow<String?> = settings.accountEmail
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
 
-    private val _notice = MutableStateFlow<Notice?>(null)
-    val notice: StateFlow<Notice?> = _notice
+    /**
+     * Last characters-load failure, kept (not just a transient
+     * snackbar). While set, the screen shows the error with a retry
+     * action — and keeps any cached characters visible. It must
+     * never silently show "no pen pals" when the load actually
+     * failed, and a failed load must never be blamed on the network
+     * when the server (or the session) is the problem: the notice
+     * text comes from the failure itself (no connection ->
+     * "server unreachable", HTTP failure -> the backend code's
+     * text, 401 -> session expired). Cleared on the next refresh
+     * attempt / success.
+     */
+    private val _charactersError = MutableStateFlow<Notice?>(null)
+    val charactersError: StateFlow<Notice?> = _charactersError
+
+    /** True when the characters error is a dead session (sign in again). */
+    private val _charactersErrorSessionExpired = MutableStateFlow(false)
+    val charactersErrorSessionExpired: StateFlow<Boolean> = _charactersErrorSessionExpired
 
     init {
         refresh()
@@ -101,9 +123,18 @@ class CharactersViewModel(
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
-            repository.refreshCharacters().onFailure {
-                _notice.value = it.userNotice()
-            }
+            _charactersError.value = null
+            _charactersErrorSessionExpired.value = false
+            repository.refreshCharacters()
+                .onSuccess {
+                    _charactersError.value = null
+                    _charactersErrorSessionExpired.value = false
+                }
+                .onFailure {
+                    _charactersError.value = it.userNotice()
+                    _charactersErrorSessionExpired.value = it is SessionExpiredException ||
+                        (it is HttpException && it.code() == 401)
+                }
             _isLoading.value = false
         }
     }
@@ -114,36 +145,25 @@ class CharactersViewModel(
         refresh()
         return repository.getCharacter(characterId)
     }
-
-    fun clearNotice() {
-        _notice.value = null
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CharactersScreen(
     viewModel: CharactersViewModel,
-    onCharacterClick: (String) -> Unit
+    onCharacterClick: (String) -> Unit,
+    onLoginClick: () -> Unit = {}
 ) {
     val characters by viewModel.characters.collectAsState()
+    val accountEmail by viewModel.accountEmail.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
-    val notice by viewModel.notice.collectAsState()
-
-    val snackbarHostState = remember { SnackbarHostState() }
-    val noticeText = notice?.let { stringResource(it.resId, *it.args.toTypedArray()) }
-    LaunchedEffect(noticeText) {
-        noticeText?.let {
-            snackbarHostState.showSnackbar(it)
-            viewModel.clearNotice()
-        }
-    }
+    val charactersError by viewModel.charactersError.collectAsState()
+    val charactersErrorSessionExpired by viewModel.charactersErrorSessionExpired.collectAsState()
 
     // Locked characters are hidden (M0: P01–P05 are all unlocked by default).
     val unlocked = characters.filter { it.unlocked }
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = { TopAppBar(title = { Text(text = stringResource(R.string.characters_title)) }) }
     ) { padding ->
         LazyColumn(
@@ -161,7 +181,59 @@ fun CharactersScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            if (unlocked.isEmpty() && !isLoading) {
+            // Not registered yet: browse-only status, never an age error.
+            if (accountEmail == null) {
+                item {
+                    Text(
+                        text = stringResource(R.string.account_not_logged_in),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            // A failed load keeps its error on screen with a retry
+            // action; cached characters below stay visible, and an
+            // empty list shows the error instead of "no pen pals".
+            // The error text itself says what failed (no connection
+            // vs server vs session) — it is never a blanket network
+            // message.
+            val error = charactersError
+            if (error != null) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = stringResource(error.resId, *error.args.toTypedArray()),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            if (unlocked.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = stringResource(R.string.characters_cached_notice),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { viewModel.refresh() }) {
+                                    Text(text = stringResource(R.string.action_retry))
+                                }
+                                if (charactersErrorSessionExpired) {
+                                    OutlinedButton(onClick = onLoginClick) {
+                                        Text(text = stringResource(R.string.account_login_register))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (unlocked.isEmpty() && !isLoading && error == null) {
                 item {
                     EmptyBox(
                         message = stringResource(R.string.characters_empty),

@@ -6,9 +6,10 @@ memory, persona and letter is scoped to one (device_id, character_id)
 pair, so character A can never recall character B's letters.
 
 Tables:
-- devices: device_id + age (age gate) + minor_mode + plan (free/member/
-  premium) + emergency_contact (encrypted) + birth_date (encrypted,
-  18+ gate for new registrations; NULL for legacy rows).
+- devices: device_id + age (NULL for anonymous devices with no known
+  age) + minor_mode + plan (free/member/premium) + emergency_contact
+  (encrypted) + birth_date (encrypted, 18+ gate for new email
+  registrations; NULL for anonymous / legacy rows).
 - users: email accounts; birth_date likewise encrypted, NULL for
   legacy accounts (old accounts are never re-gated).
 - characters: seeded P01–P05 from app/characters.py (fixed text).
@@ -827,11 +828,14 @@ def delete_activity(act_id: str) -> bool:
 #   birth date is Fernet-encrypted at rest (same level as
 #   emergency_contact) and is NEVER returned by any read path — callers
 #   only ever see `is_adult` / `has_birth_date`.
-# - age only (legacy clients that cannot send a birth date): the old
+# - age only (legacy callers that cannot send a birth date): the old
 #   behaviour is preserved — under-14s refused, 14–17s flagged
-#   minor_mode=1 — so old apps keep working. The birth-date gate is
-#   the authority for new registrations; the age number alone can
-#   never override it.
+#   minor_mode=1 — so old apps keep working, EXCEPT anonymous
+#   browsing (allow_unknown_age=True), which never gates on age at
+#   all: no age is stored as NULL, under-18 values are stored with
+#   minor_mode=1. The birth-date gate is the authority for new
+#   email registrations; the age number alone can never override it
+#   and never satisfies registration.
 # Old rows (birth_date NULL) are never re-gated: login / use of an
 # already-registered account is unaffected by the new gate.
 
@@ -911,13 +915,19 @@ def get_device(device_id: str) -> dict | None:
 
 def get_or_create_device(
     device_id: str, age: int | None = None, emergency_contact: str | None = None,
-    birth_date: str | None = None,
+    birth_date: str | None = None, allow_unknown_age: bool = False,
 ) -> dict:
     """Create a device row. On first registration either `birth_date`
     (new clients: 18+ gate, age derived from it) or `age` (legacy
-    clients: old 14+ gate) is required; later calls without either
-    return the existing row untouched — old accounts are never
-    re-gated. When both are given, birth_date wins."""
+    clients: old 14+ gate) is required — unless `allow_unknown_age`
+    is set, which is ONLY for anonymous browsing (POST /auth/device):
+    a fresh device with no age at all is created with age NULL and
+    minor_mode 0, and a supplied under-18 age / birth date is stored
+    (minor_mode 1) instead of refusing — anonymous browsing never
+    applies any age gate, because the 18+ gate lives only on email
+    registration. Later calls without either return the existing row
+    untouched — old accounts are never re-gated. When both are given,
+    birth_date wins."""
     existing = get_device(device_id)
     if existing:
         return existing
@@ -925,24 +935,27 @@ def get_or_create_device(
     if birth_date is not None:
         born = parse_birth_date(birth_date)
         age = age_from_birth_date(born)
-        if age < ADULT_AGE:
+        if age < ADULT_AGE and not allow_unknown_age:
             raise ValueError(
                 "users under 18 need to be 18 or older; registration refused"
             )
         if not 1 <= age <= 120:
             raise ValueError("age must be an integer between 1 and 120")
-        minor_mode = 0
+        minor_mode = 0 if age >= ADULT_AGE else 1
         encrypted_birth_date = encrypt_text(born.isoformat())
     else:
         if age is None:
-            raise ValueError("age is required at registration (age gate)")
-        if not isinstance(age, int) or not 1 <= age <= 120:
-            raise ValueError("age must be an integer between 1 and 120")
-        if age < MIN_AGE:
-            raise ValueError(
-                "users under 14 need a guardian's consent (minor mode is M2); registration refused"
-            )
-        minor_mode = 1 if age < 18 else 0
+            if not allow_unknown_age:
+                raise ValueError("age is required at registration (age gate)")
+            minor_mode = 0
+        else:
+            if not isinstance(age, int) or not 1 <= age <= 120:
+                raise ValueError("age must be an integer between 1 and 120")
+            if age < MIN_AGE and not allow_unknown_age:
+                raise ValueError(
+                    "users under 14 need a guardian's consent (minor mode is M2); registration refused"
+                )
+            minor_mode = 1 if age < 18 else 0
     with connect() as conn:
         conn.execute(
             "INSERT INTO devices (device_id, age, minor_mode, plan, emergency_contact,"

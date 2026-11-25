@@ -267,6 +267,78 @@ class ErrorMessagesTest {
         assertEquals(ErrorMapping(ErrorKey.BIRTH_DATE_FUTURE), e.errorMapping())
     }
 
+    @Test
+    fun birthDateRequired_400_byCode() {
+        // Registration without a birth date: the missing-date key, not
+        // an age key — the user just needs to fill the date in.
+        val e = httpError(
+            400,
+            """{"detail":"请填写出生日期","code":"birth_date_required"}"""
+        )
+        assertEquals(ErrorMapping(ErrorKey.BIRTH_DATE_REQUIRED), e.errorMapping())
+    }
+
+    // ---- Anonymous device auth must never show age wording ----
+
+    @Test
+    fun deviceAuthException_isUnknown() {
+        // An old server answering /auth/device with an age error is
+        // converted to DeviceAuthException by the repository: it maps
+        // to the generic text, never to any age key.
+        assertEquals(
+            ErrorMapping(ErrorKey.UNKNOWN_ERROR),
+            DeviceAuthException().errorMapping()
+        )
+    }
+
+    @Test
+    fun isAgeGateFailure_detectsAgeCodes() {
+        // One fresh HttpException per call: reading the error body
+        // consumes it.
+        assertEquals(
+            true,
+            httpError(
+                400,
+                """{"detail":"age is required at registration","code":"age_required"}"""
+            ).isAgeGateFailure()
+        )
+        assertEquals(
+            true,
+            httpError(
+                400,
+                """{"detail":"users under 18 are not allowed to register","code":"age_under_18"}"""
+            ).isAgeGateFailure()
+        )
+        assertEquals(
+            true,
+            httpError(
+                400,
+                """{"detail":"未满 18 周岁不能注册"}"""
+            ).isAgeGateFailure()
+        )
+    }
+
+    @Test
+    fun isAgeGateFailure_ignoresNonAgeFailures() {
+        assertEquals(
+            false,
+            httpError(
+                400,
+                """{"detail":"request invalid","code":"bad_request"}"""
+            ).isAgeGateFailure()
+        )
+        assertEquals(
+            false,
+            httpError(500, """{"detail":"boom","code":"internal_error"}""")
+                .isAgeGateFailure()
+        )
+        assertEquals(
+            false,
+            httpError(401, """{"detail":"invalid token","code":"invalid_token"}""")
+                .isAgeGateFailure()
+        )
+    }
+
     // ---- Anonymous write gate (403 anonymous_letter_forbidden) ----
 
     @Test

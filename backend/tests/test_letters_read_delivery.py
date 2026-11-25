@@ -50,6 +50,8 @@ def _registered(email: str) -> tuple[str, str]:
     token, code, _png = email_auth.create_captcha()
     r = client.post("/api/v1/auth/register", json={
         "email": email, "password": "password123", "age": 30,
+        # Registration requires a birth date (18+ gate).
+        "birth_date": "1996-06-15",
         "display_name": "阿辉",
         "captcha_token": token, "captcha_text": code,
     })
