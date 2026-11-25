@@ -41,7 +41,25 @@ jobs:
         working-directory: app
         run: gradle assembleDebug --stacktrace
 
+      # Run the local unit tests (incl. the navigation tests that prove
+      # the bottom-tab destinations). Previously CI only assembled the
+      # APK, so unit tests were never executed anywhere.
+      - name: Run unit tests
+        working-directory: app
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      # On failure, keep the JUnit XML (expected/actual per test) so a
+      # failing navigation assertion can be read instead of guessed.
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: app/app/build/test-results/testDebugUnitTest/
+          if-no-files-found: error
+
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: penpal-debug-apk

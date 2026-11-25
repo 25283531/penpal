@@ -31,6 +31,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -136,6 +137,45 @@ inline fun <reified T : ViewModel> vmFactory(crossinline create: () -> T) =
         override fun <T2 : ViewModel> create(modelClass: Class<T2>): T2 = create() as T2
     }
 
+/**
+ * Bottom-tab navigation, shared by the bottom bar and by screens that
+ * jump to a tab (AccountScreen's "go write / go home" exits, and the
+ * login-success jump home). Internal (not private) so the navigation
+ * unit test (GoTabTest) exercises this exact function instead of a
+ * copy: any drift between the tested logic and the shipped logic
+ * would make the test worthless.
+ *
+ * Behaviour: pop everything above the start destination (saving state)
+ * and navigate single-top to the tab. In particular, tapping "我"
+ * while on the account page (change password / verify email) must pop
+ * the account page off the stack: the back stack afterwards is
+ * [home, me], so neither tapping the tab nor pressing system-back
+ * from "我" can land the user back on the change-password page.
+ *
+ * Deliberately NO restoreState: with restoreState = true, tapping a
+ * tab whose destination is already on the back stack below the top
+ * (e.g. [home, me, account] -> "我") is a complete no-op in
+ * navigation 2.8.0 — NavController attempts a state restore for the
+ * target, finds no saved state for it (it was never popped), and
+ * returns without popping or navigating, leaving the user stuck on
+ * the account page. Reproduced at runtime by GoTabTest (CI run
+ * 45622214667: goTab left the stack exactly [graph, home, me,
+ * account]; the same shapes pass with restoreState dropped).
+ * Cost of dropping it: a tab switch no longer restores that tab's
+ * previously saved UI state (e.g. scroll position); the tab is
+ * rebuilt fresh instead. For this app that is negligible — Home
+ * refreshes on every return, lists come from cache — and it is the
+ * only change that makes tab taps work in every stack shape.
+ */
+internal fun navigateToTab(navController: NavController, route: String) {
+    navController.navigate(route) {
+        popUpTo(navController.graph.findStartDestination().id) {
+            saveState = true
+        }
+        launchSingleTop = true
+    }
+}
+
 @Composable
 private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
     val navController = rememberNavController()
@@ -170,15 +210,7 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
         }
     }
 
-    val goTab: (String) -> Unit = { route ->
-        navController.navigate(route) {
-            popUpTo(navController.graph.findStartDestination().id) {
-                saveState = true
-            }
-            launchSingleTop = true
-            restoreState = true
-        }
-    }
+    val goTab: (String) -> Unit = { route -> navigateToTab(navController, route) }
 
     Scaffold(
         bottomBar = {
