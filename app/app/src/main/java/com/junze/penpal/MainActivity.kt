@@ -265,7 +265,20 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
                 WriteLetterScreen(
                     characterId = characterId,
                     viewModel = vm,
-                    onSent = { navController.popBackStack() },
+                    onSent = {
+                        // Back to the timeline, where the new letter (with
+                        // its expected reply time) is visible. From the
+                        // character page one pop already lands on the
+                        // thread; from a letter detail page pop twice —
+                        // write -> letter detail -> the timeline under it
+                        // (character thread, or Home when the detail was
+                        // opened from there).
+                        val cameFromLetterDetail =
+                            navController.previousBackStackEntry?.destination?.route ==
+                                Routes.LETTER_DETAIL
+                        navController.popBackStack()
+                        if (cameFromLetterDetail) navController.popBackStack()
+                    },
                     onBack = { navController.popBackStack() },
                     isRegistered = isRegistered,
                     onRegisterClick = { navController.navigate(Routes.ACCOUNT) }
@@ -284,7 +297,12 @@ private fun MainScaffold(app: PenpalApp, onLanguageChange: (String) -> Unit) {
                 LetterDetailScreen(
                     viewModel = vm,
                     onBack = { navController.popBackStack() },
-                    onMarkedRead = { unreadViewModel.refresh() }
+                    onMarkedRead = { unreadViewModel.refresh() },
+                    onReplyClick = { characterId ->
+                        navController.navigate(Routes.writeLetter(characterId))
+                    },
+                    isRegistered = isRegistered,
+                    onRegisterClick = { navController.navigate(Routes.ACCOUNT) }
                 )
             }
             composable(Routes.ME) {

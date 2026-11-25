@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Reply button on an AI letter's detail page (added 2026-11-25).
+         Kept in its own file so the letter strings stay together;
+         check_strings.py covers every values-en/*.xml file. -->
+    <string name="letter_reply">Reply</string>
+</resources>

@@ -3,8 +3,8 @@
 
 Run:  python3 app/check_strings.py
 Checks:
-  1. values/strings.xml and values-en/strings.xml parse as XML and have
-     identical key sets (no missing translation).
+  1. every values/*.xml and values-en/*.xml file parses as XML and the
+     two locales have identical key sets (no missing translation).
   2. Format args match per key (%1$d vs %1$s, same positions).
   3. Every ErrorKey in ErrorMessages.kt maps to an R.string.* that exists
      in BOTH files (so no error can resolve to a missing string).
@@ -20,8 +20,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-ZH = ROOT / "app/src/main/res/values/strings.xml"
-EN = ROOT / "app/src/main/res/values-en/strings.xml"
+ZH = ROOT / "app/src/main/res/values"
+EN = ROOT / "app/src/main/res/values-en"
 ERR = ROOT / "app/src/main/java/com/junze/penpal/ui/components/ErrorMessages.kt"
 
 failures = []
@@ -34,8 +34,20 @@ def check(cond, msg):
 
 
 def load_strings(path):
-    tree = ET.parse(path)
-    return {el.get("name"): (el.text or "") for el in tree.getroot() if el.tag == "string"}
+    """All string keys in every values XML file of one locale, merged.
+    A key duplicated across files of the same locale fails loudly —
+    Android would silently pick one, so the repo must not have any."""
+    merged = {}
+    for f in sorted(Path(path).glob("*.xml")):
+        tree = ET.parse(f)
+        for el in tree.getroot():
+            if el.tag != "string":
+                continue
+            name = el.get("name")
+            if name in merged:
+                failures.append(f"duplicate string key {name} in {path}")
+            merged[name] = el.text or ""
+    return merged
 
 
 def fmt_args(text):

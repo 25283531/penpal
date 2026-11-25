@@ -18,11 +18,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -47,7 +50,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -170,16 +172,6 @@ class MeViewModel(
         }
     }
 
-    fun changePassword(current: String, new: String) {
-        viewModelScope.launch {
-            _busy.value = true
-            repository.changePassword(current, new)
-                .onSuccess { _notice.value = Notice(R.string.account_password_changed) }
-                .onFailure { _notice.value = it.userNotice() }
-            _busy.value = false
-        }
-    }
-
     fun clearNotice() {
         _notice.value = null
     }
@@ -215,8 +207,6 @@ fun MeScreen(
         }
     }
 
-    var currentPassword by remember { mutableStateOf("") }
-    var newPassword by remember { mutableStateOf("") }
     var editingName by remember { mutableStateOf(false) }
     var nameDraft by remember { mutableStateOf("") }
 
@@ -496,6 +486,40 @@ fun MeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+                        // Entry row to the account page, where the
+                        // password / verify forms live. Only the row that
+                        // applies to this account state is shown — never
+                        // the forms themselves (they used to be embedded
+                        // here, so opening "我" read as opening the
+                        // change-password page).
+                        if (accountEmail != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(onClick = onAccountClick)
+                                    .padding(vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = stringResource(
+                                        if (emailVerified) {
+                                            R.string.account_change_password
+                                        } else {
+                                            R.string.account_verify_email
+                                        }
+                                    ),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                         if (accountEmail != null) {
                             OutlinedButton(
                                 onClick = { viewModel.logout() },
@@ -551,75 +575,11 @@ fun MeScreen(
                 }
             }
 
-            // ---- Change password (verified email only) ----
-            // Unverified / not-logged-in: show "请先验证邮箱" + a Verify
-            // action instead of the change form. Verified: the form.
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = stringResource(R.string.account_change_password),
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        when {
-                            accountEmail == null -> {
-                                Text(
-                                    text = stringResource(R.string.account_login_first),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Button(
-                                    onClick = onAccountClick,
-                                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                                ) { Text(text = stringResource(R.string.account_login_register)) }
-                            }
-                            !emailVerified -> {
-                                Text(
-                                    text = stringResource(R.string.account_verify_first),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Button(
-                                    onClick = onAccountClick,
-                                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                                ) { Text(text = stringResource(R.string.verify_action)) }
-                            }
-                            else -> {
-                                OutlinedTextField(
-                                    value = currentPassword,
-                                    onValueChange = { currentPassword = it },
-                                    label = { Text(text = stringResource(R.string.account_current_password)) },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    visualTransformation = PasswordVisualTransformation()
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                OutlinedTextField(
-                                    value = newPassword,
-                                    onValueChange = { newPassword = it },
-                                    label = { Text(text = stringResource(R.string.account_new_password)) },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    visualTransformation = PasswordVisualTransformation()
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Button(
-                                    onClick = { viewModel.changePassword(currentPassword, newPassword) },
-                                    enabled = !busy && currentPassword.isNotBlank() && newPassword.length >= 8,
-                                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                                ) { Text(text = stringResource(R.string.account_change_password)) }
-                            }
-                        }
-                    }
-                }
-            }
+            // NOTE: the change-password form and the verify-email entry
+            // used to be embedded here, so opening "我" read as opening
+            // the change-password page. They live only on the account
+            // page now (AccountScreen); this page links there through
+            // the "修改密码" / "验证邮箱" row in the account card above.
 
             // ---- Messages & activities (fetch-on-open) ----
             item {
