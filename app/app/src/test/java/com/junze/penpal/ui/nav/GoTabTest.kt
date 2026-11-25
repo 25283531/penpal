@@ -2,6 +2,7 @@ package com.junze.penpal.ui.nav
 
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavType
+import androidx.navigation.compose.ComposeNavigator
 import androidx.navigation.compose.composable
 import androidx.navigation.createGraph
 import androidx.navigation.navArgument
@@ -53,6 +54,12 @@ class GoTabTest {
     @Before
     fun setUp() {
         navController = TestNavHostController(RuntimeEnvironment.getApplication())
+        // TestNavHostController's provider has no ComposeNavigator, and the
+        // composable() graph builder casts its fallback navigator to one
+        // (ClassCastException at the first composable() call). Register the
+        // real one: destination content never executes under the test
+        // controller, only the NavController back-stack machinery runs.
+        navController.navigatorProvider.addNavigator(ComposeNavigator())
         // Mirror of MainScaffold's NavHost: every route, same start.
         navController.graph = navController.createGraph(
             startDestination = Routes.HOME
