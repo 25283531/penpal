@@ -19,6 +19,8 @@ stays plaintext (category, dates, counts, device_id, violation flags,
 memory emotion/recall counts, relationship stage, traits) because the
 admin aggregate statistics are computed from it.
 """
+import hashlib
+import hmac
 import os
 from pathlib import Path
 
@@ -65,18 +67,52 @@ def encrypt_text(plaintext: str) -> str:
     return get_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
 
 
+def fingerprint_for_key(key: bytes | str) -> str:
+    """SHA256 fingerprint (first 12 hex chars) of one key value.
+
+    Only the fingerprint is ever exposed or compared; the key value
+    itself never leaves the caller. Leading/trailing whitespace is
+    stripped so a pasted key with a stray newline still matches."""
+    raw = key.encode("utf-8") if isinstance(key, str) else key
+    return hashlib.sha256(raw.strip()).hexdigest()[:12]
+
+
 def key_fingerprint() -> str | None:
     """SHA256 fingerprint (first 12 hex chars) of the key file, or None
     when the file does not exist. This deliberately does NOT create the
     key (unlike load_or_create_key) — a status check must never mint a
     new key. Only the fingerprint is ever exposed; the key value itself
     never leaves this module."""
-    import hashlib
-
     path = key_path()
     if not path.exists():
         return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    return fingerprint_for_key(path.read_bytes())
+
+
+def presented_key_matches(presented: str | None) -> bool:
+    """Constant-time check: does the key an admin just presented match
+    the stored key file? Compares SHA256 fingerprints with
+    hmac.compare_digest — the presented value is never logged and
+    never compared byte-for-byte against the stored value."""
+    if not presented or not presented.strip():
+        return False
+    stored = key_fingerprint()
+    if stored is None:
+        return False
+    try:
+        return hmac.compare_digest(fingerprint_for_key(presented), stored)
+    except (ValueError, TypeError):
+        return False
+
+
+def decrypt_text_with_key(token: str, key: bytes | str) -> str:
+    """Decrypt a token with an explicitly supplied key (the one the
+    admin presented for this one view), NOT the stored key file.
+    Raises InvalidToken for a token this key cannot open, and
+    ValueError for a malformed key. Callers must drop the key from
+    memory as soon as this returns."""
+    raw = key.encode("utf-8") if isinstance(key, str) else key
+    return Fernet(raw.strip()).decrypt(token.encode("ascii")).decode("utf-8")
 
 
 def key_status() -> dict:

@@ -58,6 +58,18 @@ def _audit_rows() -> list[dict]:
     return database.list_audit_logs(limit=500)
 
 
+def _test_key() -> str:
+    """The test database's decryption key value (read from the key
+    file). Tests may use it because it is a throwaway test key; the
+    value is never asserted into any response or audit row."""
+    return crypto.key_path().read_text(encoding="utf-8").strip()
+
+
+def _wrong_key() -> str:
+    from cryptography.fernet import Fernet
+    return Fernet.generate_key().decode("ascii")
+
+
 # ---------- privacy text ----------
 
 def test_privacy_text_covers_audit_points():
@@ -143,11 +155,14 @@ def test_view_success_writes_audit_log_without_content():
     letter = _seed_letter()
     r = _login().post(
         f"/api/v1/admin/letters/{letter['id']}/view",
-        json={"reason": "执法检查", "note": "配合检查"},
+        json={"reason": "执法检查", "note": "配合检查",
+              "decryption_key": _test_key()},
     )
     assert r.status_code == 200, r.text
     assert r.json()["text"] == MARKER
     assert r.json()["audit_id"]
+    # the key itself is never echoed back in the response
+    assert _test_key() not in json.dumps(r.json(), ensure_ascii=False)
     rows = database.list_audit_logs(letter_id=letter["id"])
     assert len(rows) == 1
     row = rows[0]
@@ -156,15 +171,98 @@ def test_view_success_writes_audit_log_without_content():
     assert row["result"] == "ok"
     assert row["operator"].startswith("admin:")
     assert row["letter_id"] == letter["id"]
-    # the audit log itself never contains letter content
+    # the audit log itself never contains letter content or the key
     blob = json.dumps(rows, ensure_ascii=False)
     assert MARKER not in blob
+    assert _test_key() not in blob
     # filter by letter id on the API too
     r = _login().get("/api/v1/admin/audit-log",
                          params={"letter_id": letter["id"]})
     assert r.status_code == 200
     assert len(r.json()) == 1
     assert MARKER not in json.dumps(r.json(), ensure_ascii=False)
+
+
+# ---------- view: key is required, and must match ----------
+
+def test_view_without_key_is_refused_and_audited_key_missing():
+    letter = _seed_letter()
+    before = len(_audit_rows())
+    r = _login().post(
+        f"/api/v1/admin/letters/{letter['id']}/view",
+        json={"reason": "执法检查"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["code"] == "decryption_key_required"
+    assert MARKER not in r.text
+    assert _test_key() not in r.text
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1
+    assert rows[0]["action"] == "letter_view_failed"
+    assert rows[0]["result"] == "key_missing"
+    assert MARKER not in json.dumps(rows, ensure_ascii=False)
+    assert _test_key() not in json.dumps(rows, ensure_ascii=False)
+    assert len(_audit_rows()) == before + 1
+
+
+def test_view_wrong_key_is_refused_and_audited_key_mismatch():
+    letter = _seed_letter()
+    r = _login().post(
+        f"/api/v1/admin/letters/{letter['id']}/view",
+        json={"reason": "故障排查", "decryption_key": _wrong_key()},
+    )
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "decryption_key_mismatch"
+    assert MARKER not in r.text
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1
+    assert rows[0]["action"] == "letter_view_failed"
+    assert rows[0]["result"] == "key_mismatch"
+    assert MARKER not in json.dumps(rows, ensure_ascii=False)
+    assert _wrong_key() not in json.dumps(rows, ensure_ascii=False)
+
+
+def test_view_malformed_key_is_refused_as_mismatch():
+    letter = _seed_letter()
+    r = _login().post(
+        f"/api/v1/admin/letters/{letter['id']}/view",
+        json={"reason": "故障排查", "decryption_key": "not-a-fernet-key"},
+    )
+    assert r.status_code == 403, r.text
+    assert MARKER not in r.text
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1 and rows[0]["result"] == "key_mismatch"
+
+
+# ---------- view: reason "其他" requires a note ----------
+
+def test_view_other_reason_without_note_is_refused_400_no_audit():
+    letter = _seed_letter()
+    before = len(_audit_rows())
+    for note in (None, "", "   "):
+        body = {"reason": "其他", "decryption_key": _test_key()}
+        if note is not None:
+            body["note"] = note
+        r = _login().post(f"/api/v1/admin/letters/{letter['id']}/view",
+                          json=body)
+        assert r.status_code == 400, r.text
+        assert r.json()["code"] == "audit_note_required_for_other"
+        assert MARKER not in r.text
+    assert len(_audit_rows()) == before  # refused views write no audit row
+
+
+def test_view_other_reason_with_note_and_key_succeeds():
+    letter = _seed_letter()
+    r = _login().post(
+        f"/api/v1/admin/letters/{letter['id']}/view",
+        json={"reason": "其他", "note": "用户电话里要求核查",
+              "decryption_key": _test_key()},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["text"] == MARKER
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1 and rows[0]["result"] == "ok"
+    assert rows[0]["note"] == "用户电话里要求核查"
 
 
 # ---------- view: missing letter + decrypt failure are audited ----------
@@ -186,7 +284,7 @@ def test_view_decrypt_failure_is_audited_and_returns_no_content():
     conn.close()
     r = _login().post(
         f"/api/v1/admin/letters/{letter['id']}/view",
-        json={"reason": "故障排查"},
+        json={"reason": "故障排查", "decryption_key": _test_key()},
     )
     assert r.status_code == 502, r.text
     assert "AUDIT-CORRUPT" not in r.text
@@ -227,15 +325,69 @@ def test_cli_view_writes_same_audit_log(monkeypatch, capsys):
     letter = _seed_letter("AUDIT-CLI-55dd-原文")
     monkeypatch.setenv("PENPAL_ADMIN_PASSWORD", ADMIN_PASSWORD)
     rc = audit_view.main(["--letter-id", str(letter["id"]),
-                          "--reason", "用户申诉", "--operator", "tester"])
+                          "--reason", "用户申诉", "--operator", "tester",
+                          "--decryption-key", _test_key()])
     assert rc == 0
     out = capsys.readouterr().out
     assert "AUDIT-CLI-55dd-原文" in out
+    assert _test_key() not in out
     rows = database.list_audit_logs(letter_id=letter["id"])
     assert len(rows) == 1
     assert rows[0]["action"] == "letter_view"
     assert rows[0]["operator"] == "cli:tester"
     assert rows[0]["reason"] == "用户申诉"
+    assert _test_key() not in json.dumps(rows, ensure_ascii=False)
+
+
+def test_cli_key_file_view_succeeds(monkeypatch, capsys):
+    letter = _seed_letter("AUDIT-CLI-FILE-77aa-原文")
+    monkeypatch.setenv("PENPAL_ADMIN_PASSWORD", ADMIN_PASSWORD)
+    rc = audit_view.main(["--letter-id", str(letter["id"]),
+                          "--reason", "执法检查",
+                          "--key-file", str(crypto.key_path())])
+    assert rc == 0
+    assert "AUDIT-CLI-FILE-77aa-原文" in capsys.readouterr().out
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1 and rows[0]["result"] == "ok"
+
+
+def test_cli_missing_key_refused_and_audited(monkeypatch, capsys):
+    letter = _seed_letter("AUDIT-CLI-88bb-原文")
+    monkeypatch.setenv("PENPAL_ADMIN_PASSWORD", ADMIN_PASSWORD)
+    # No key arg: getpass prompt hits EOF in tests -> treated as missing.
+    rc = audit_view.main(["--letter-id", str(letter["id"]),
+                          "--reason", "执法检查"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "AUDIT-CLI-88bb-原文" not in out
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1
+    assert rows[0]["action"] == "letter_view_failed"
+    assert rows[0]["result"] == "key_missing"
+
+
+def test_cli_wrong_key_refused_and_audited(monkeypatch, capsys):
+    letter = _seed_letter("AUDIT-CLI-99cc-原文")
+    monkeypatch.setenv("PENPAL_ADMIN_PASSWORD", ADMIN_PASSWORD)
+    rc = audit_view.main(["--letter-id", str(letter["id"]),
+                          "--reason", "执法检查",
+                          "--decryption-key", _wrong_key()])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "AUDIT-CLI-99cc-原文" not in out
+    rows = database.list_audit_logs(letter_id=letter["id"])
+    assert len(rows) == 1 and rows[0]["result"] == "key_mismatch"
+
+
+def test_cli_other_reason_without_note_refused_no_audit(monkeypatch, capsys):
+    letter = _seed_letter()
+    before = len(database.list_audit_logs(letter_id=letter["id"]))
+    monkeypatch.setenv("PENPAL_ADMIN_PASSWORD", ADMIN_PASSWORD)
+    rc = audit_view.main(["--letter-id", str(letter["id"]),
+                          "--reason", "其他",
+                          "--decryption-key", _test_key()])
+    assert rc == 2
+    assert len(database.list_audit_logs(letter_id=letter["id"])) == before
 
 
 def test_cli_wrong_password_views_nothing(monkeypatch, capsys):
