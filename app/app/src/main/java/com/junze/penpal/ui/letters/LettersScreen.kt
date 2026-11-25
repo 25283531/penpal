@@ -67,11 +67,13 @@ import com.junze.penpal.data.repository.MAX_LETTER_CHARS
 import com.junze.penpal.data.repository.PenpalRepository
 import com.junze.penpal.ui.components.EmptyBox
 import com.junze.penpal.ui.components.Notice
+import com.junze.penpal.ui.components.SessionExpiredException
 import com.junze.penpal.ui.components.expectedReplyText
 import com.junze.penpal.ui.components.formatDateTimeShanghai
 import com.junze.penpal.ui.components.userNotice
 import com.junze.penpal.ui.home.letterReadLine
 import java.util.Locale
+import retrofit2.HttpException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
